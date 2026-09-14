@@ -101,10 +101,13 @@ function getConversationHistory() {
 */
 
 function askOllama($messages) {
-    $url = 'http://localhost:11434/api/chat';
+
+    $apiKey = '141a9f1faf5f46b99a2d716ccbe6c6a6.TX1semH-ECfPQ4rkjYgb1mrf';
+
+    $url = 'https://ollama.com/api/chat';
 
     $data = [
-        'model' => 'llama3.2',
+        'model' => 'gpt-oss:20b-cloud',
         'messages' => $messages,
         'stream' => false,
         'format' => 'json',
@@ -113,62 +116,106 @@ function askOllama($messages) {
         ]
     ];
 
+    $jsonData = json_encode($data);
+
+    if ($jsonData === false) {
+        return [
+            'success' => false,
+            'content' => '',
+            'error' => 'Unable to encode Ollama request.'
+        ];
+    }
+
     $ch = curl_init($url);
 
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Content-Type: application/json'
-    ]);
 
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+    curl_setopt(
+        $ch,
+        CURLOPT_POSTFIELDS,
+        $jsonData
+    );
 
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
+    curl_setopt(
+        $ch,
+        CURLOPT_HTTPHEADER,
+        [
+            'Content-Type: application/json',
+            'Authorization: Bearer ' . $apiKey
+        ]
+    );
+
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
     curl_setopt($ch, CURLOPT_TIMEOUT, 60);
 
     $response = curl_exec($ch);
 
     if ($response === false) {
+
         $error = curl_error($ch);
 
         curl_close($ch);
 
         return [
             'success' => false,
+            'content' => '',
             'error' => $error
         ];
     }
 
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $httpCode = curl_getinfo(
+        $ch,
+        CURLINFO_HTTP_CODE
+    );
 
     curl_close($ch);
 
-    if ($httpCode !== 200) {
+    if ($httpCode < 200 || $httpCode >= 300) {
+
         return [
             'success' => false,
-            'error' => 'Ollama returned HTTP ' . $httpCode
+            'content' => '',
+            'error' => 'Ollama HTTP error: ' . $httpCode
         ];
     }
 
-    $decoded = json_decode($response, true);
+    /*
+    |--------------------------------------------------------------------------
+    | Decode Ollama response
+    |--------------------------------------------------------------------------
+    */
 
-    if (!is_array($decoded)) {
+    $result = json_decode(
+        $response,
+        true
+    );
+
+    if (!is_array($result)) {
+
         return [
             'success' => false,
-            'error' => 'Invalid response from Ollama.'
+            'content' => '',
+            'error' => 'Invalid JSON response from Ollama.'
         ];
     }
 
-    if (!isset($decoded['message']['content'])) {
+    if (
+        !isset($result['message']) ||
+        !isset($result['message']['content'])
+    ) {
+
         return [
             'success' => false,
-            'error' => 'Ollama returned an empty response.'
+            'content' => '',
+            'error' => 'Ollama response does not contain message content.'
         ];
     }
 
     return [
         'success' => true,
-        'content' => $decoded['message']['content']
+        'content' => $result['message']['content'],
+        'error' => ''
     ];
 }
 
@@ -248,6 +295,10 @@ function normalizeAvailability($availability) {
         return 'available';
     }
 
+    if ($availability === 'low_stock' || $availability === 'low stock' || $availability === 'low stocks' || $availability === 'low inventory' || $availability === 'below 50' || $availability === 'less than 50') {
+        return 'low_stock';
+    }
+
     if ($availability === 'out_of_stock' || $availability === 'out of stock' || $availability === 'outofstock') {
         return 'out_of_stock';
     }
@@ -279,15 +330,25 @@ function normalizeResponseType($responseType) {
 
 function analyzeInventoryRequest($message, $context, $history) {
     $systemPrompt = <<<PROMPT
-You are the inventory request interpreter for a PHP inventory chatbot.
+You are an inventory request interpreter for a PHP inventory chatbot.
 
-Your job is NOT to calculate inventory.
+IMPORTANT:
 
-Your job is only to understand the user's message and return JSON filters.
+Your ONLY job is to understand the user's request and return JSON filters.
 
-The actual inventory database is handled by PHP.
+You DO NOT have access to the inventory database.
 
-Current inventory context:
+You MUST NOT calculate inventory quantities.
+
+You MUST NOT guess inventory values.
+
+You MUST NOT invent gender, size, availability, or item names.
+
+PHP will use your JSON output to query and filter the actual database.
+
+==================================================
+CURRENT INVENTORY CONTEXT
+==================================================
 
 item_name: {$context['item_name']}
 gender: {$context['gender']}
@@ -295,13 +356,17 @@ size: {$context['size']}
 availability: {$context['availability']}
 response_type: {$context['response_type']}
 
-Possible gender values:
+==================================================
+ALLOWED VALUES
+==================================================
+
+gender:
 
 male
 female
 empty
 
-Possible size values:
+size:
 
 XSmall
 Small
@@ -310,28 +375,307 @@ Large
 XLarge
 empty
 
-Possible availability values:
+availability:
 
 all
 available
+low_stock
 out_of_stock
 
-Possible response_type values:
+response_type:
 
 total
 list
 
-Rules:
+==================================================
+CRITICAL RULE: NEVER GUESS
+==================================================
 
-1. Preserve the existing context when the user is asking a follow-up question.
+If the user does NOT explicitly provide a value, DO NOT invent one.
+
+For example:
+
+User:
+BSBA Uniform Set
+
+Correct:
+
+{
+    "type": "inventory",
+    "response_type": "total",
+    "item_name": "BSBA Uniform Set",
+    "gender": "",
+    "size": "",
+    "availability": "all"
+}
+
+WRONG:
+
+{
+    "gender": "Unisex",
+    "size": "M",
+    "availability": "available"
+}
+
+Do NOT use "Unisex".
+
+Do NOT assume Medium.
+
+Do NOT assume available.
+
+Do NOT assume out_of_stock.
+
+Do NOT infer values from the item name.
+
+An empty value means the user did not specify that filter.
+
+==================================================
+ITEM NAME RULES
+==================================================
+
+If the user explicitly mentions an inventory item, use that item name.
 
 Example:
 
-Previous item:
+User:
 BSBA Uniform Set
 
+Return:
+
+"item_name": "BSBA Uniform Set"
+
+If the user does not mention an item and the existing context contains an item, preserve the existing item.
+
+If the user says "all items", clear item_name:
+
+"item_name": ""
+
+Do NOT invent an item name.
+
+==================================================
+GENDER RULES
+==================================================
+
+Only set gender when the user explicitly asks for male or female.
+
+Examples:
+
+"male"
+
+gender = "male"
+
+"female"
+
+gender = "female"
+
+"male stocks"
+
+gender = "male"
+
+"female stocks"
+
+gender = "female"
+
+If gender is not mentioned, preserve the existing context.
+
+If there is no existing gender, use:
+
+"gender": ""
+
+NEVER return:
+
+"gender": "Unisex"
+
+unless "Unisex" is explicitly part of the user's request and Unisex is supported by PHP.
+
+For this chatbot, the only valid gender values are:
+
+male
+female
+empty
+
+==================================================
+SIZE RULES
+==================================================
+
+Only set size when the user explicitly mentions a supported size.
+
+Supported sizes:
+
+XSmall
+Small
+Medium
+Large
+XLarge
+
+Examples:
+
+"Small"
+
+size = "Small"
+
+"male Small"
+
+size = "Small"
+
+"Medium"
+
+size = "Medium"
+
+If the user does not mention a size, preserve the existing context.
+
+If there is no existing size, use:
+
+"size": ""
+
+If the user says:
+
+"all sizes"
+
+clear the size:
+
+"size": ""
+
+NEVER guess a size.
+
+For example:
+
 User:
-"male?"
+BSBA Uniform Set
+
+DO NOT return:
+
+"size": "Medium"
+
+Return:
+
+"size": ""
+
+==================================================
+AVAILABILITY RULES
+==================================================
+
+Only change availability when the user explicitly requests availability filtering.
+
+If the user says:
+
+"available"
+"only available"
+"available only"
+"in stock"
+"in stock only"
+"only in stock"
+
+use:
+
+"availability": "available"
+
+Available means:
+
+quantity > 0
+
+If the user says:
+
+"low stock"
+"low stocks"
+"low inventory"
+"below 50"
+"less than 50"
+
+use:
+
+"availability": "low_stock"
+
+Low stock means:
+
+quantity > 0
+AND
+quantity < 50
+
+Therefore:
+
+0 = out of stock
+1-49 = low stock
+50 or more = normal stock
+
+Do NOT include quantity 0 as low stock.
+
+If the user says:
+
+"out of stock"
+"unavailable"
+"not available"
+
+use:
+
+"availability": "out_of_stock"
+
+If the user does not mention availability, preserve the existing context.
+
+If there is no existing availability, use:
+
+"availability": "all"
+
+NEVER determine availability from the item name.
+
+NEVER assume an item is in stock.
+
+NEVER assume an item is out of stock.
+
+==================================================
+RESPONSE TYPE RULES
+==================================================
+
+If the user asks:
+
+"how many"
+"how much"
+"how many are there"
+"what is the quantity"
+"what's the quantity"
+"quantity"
+
+use:
+
+"response_type": "total"
+
+If the user says:
+
+"list"
+"list them"
+"show"
+"show me"
+"display"
+"display them"
+
+use:
+
+"response_type": "list"
+
+If the user does not explicitly request a list, preserve the existing response_type.
+
+If there is no existing response_type, use:
+
+"total"
+
+==================================================
+FOLLOW-UP QUESTIONS
+==================================================
+
+Preserve existing context when the user asks a follow-up question.
+
+Example:
+
+Current context:
+
+item_name = BSBA Uniform Set
+gender = ""
+size = ""
+availability = all
+
+User:
+
+male?
 
 Return:
 
@@ -344,69 +688,295 @@ Return:
     "availability": "all"
 }
 
-2. If the user says "female", change gender to female while preserving the existing item, size and availability.
+Example:
 
-3. If the user says "male", change gender to male while preserving the existing item, size and availability.
+Current context:
 
-4. If the user says "all sizes", clear the size filter.
+item_name = BSBA Uniform Set
+gender = male
+size = ""
+availability = all
 
-5. If the user says "all items", clear the item_name filter.
+User:
 
-6. If the user says "only available", "available only", or "in stock only", set availability to available.
+Small
 
-7. If the user says "out of stock", set availability to out_of_stock.
+Return:
 
-8. If the user asks "how many", use response_type total.
+{
+    "type": "inventory",
+    "response_type": "total",
+    "item_name": "BSBA Uniform Set",
+    "gender": "male",
+    "size": "Small",
+    "availability": "all"
+}
 
-9. If the user says "list", "show", "display", or "show me", use response_type list.
+Example:
 
-10. If the user asks about a specific inventory item, put the item name in item_name.
+Current context:
 
-11. Do not invent item names.
+item_name = BSBA Uniform Set
+gender = male
+size = Small
+availability = all
 
-12. Keep item_name empty if the user is asking for all inventory.
+User:
 
-13. "show all items" means:
-    type = inventory
-    response_type = list
-    item_name = empty
-    gender = empty
-    size = empty
-    availability = all
+only available ones
 
-14. "how many items are there" means:
-    type = inventory
-    response_type = total
-    item_name = empty
-    gender = empty
-    size = empty
-    availability = all
+Return:
 
-15. If the user says "eleazar", return:
+{
+    "type": "inventory",
+    "response_type": "total",
+    "item_name": "BSBA Uniform Set",
+    "gender": "male",
+    "size": "Small",
+    "availability": "available"
+}
+
+Example:
+
+Current context:
+
+item_name = BSBA Uniform Set
+gender = male
+size = Small
+availability = all
+
+User:
+
+only low stock ones
+
+Return:
+
+{
+    "type": "inventory",
+    "response_type": "total",
+    "item_name": "BSBA Uniform Set",
+    "gender": "male",
+    "size": "Small",
+    "availability": "low_stock"
+}
+
+==================================================
+SPECIAL COMMANDS
+==================================================
+
+If the user says:
+
+eleazar
+
+return exactly:
+
 {
     "type": "chat",
     "response": "So cool!"
 }
 
-16. Greetings should return:
+Greetings such as:
+
+hello
+hi
+hey
+good morning
+good afternoon
+good evening
+
+return:
+
 {
     "type": "greeting"
 }
 
-17. If the user asks what you can do, return:
+If the user asks what the chatbot can do, return:
+
 {
     "type": "help"
 }
 
-18. For unrelated conversational questions, return:
+For unrelated conversational questions, return:
+
 {
     "type": "general",
     "response": "your natural response"
 }
 
-19. Return ONLY valid JSON.
+==================================================
+INVENTORY EXAMPLES
+==================================================
 
-JSON format for inventory:
+User:
+
+BSBA Uniform Set
+
+Return:
+
+{
+    "type": "inventory",
+    "response_type": "total",
+    "item_name": "BSBA Uniform Set",
+    "gender": "",
+    "size": "",
+    "availability": "all"
+}
+
+User:
+
+How many BSBA Uniform Set?
+
+Return:
+
+{
+    "type": "inventory",
+    "response_type": "total",
+    "item_name": "BSBA Uniform Set",
+    "gender": "",
+    "size": "",
+    "availability": "all"
+}
+
+User:
+
+Male BSBA Uniform Set
+
+Return:
+
+{
+    "type": "inventory",
+    "response_type": "total",
+    "item_name": "BSBA Uniform Set",
+    "gender": "male",
+    "size": "",
+    "availability": "all"
+}
+
+User:
+
+Male Small BSBA Uniform Set
+
+Return:
+
+{
+    "type": "inventory",
+    "response_type": "total",
+    "item_name": "BSBA Uniform Set",
+    "gender": "male",
+    "size": "Small",
+    "availability": "all"
+}
+
+User:
+
+List male Small BSBA Uniform Set
+
+Return:
+
+{
+    "type": "inventory",
+    "response_type": "list",
+    "item_name": "BSBA Uniform Set",
+    "gender": "male",
+    "size": "Small",
+    "availability": "all"
+}
+
+User:
+
+List all available male stocks
+
+Return:
+
+{
+    "type": "inventory",
+    "response_type": "list",
+    "item_name": "",
+    "gender": "male",
+    "size": "",
+    "availability": "available"
+}
+
+User:
+
+List all low stock male items
+
+Return:
+
+{
+    "type": "inventory",
+    "response_type": "list",
+    "item_name": "",
+    "gender": "male",
+    "size": "",
+    "availability": "low_stock"
+}
+
+User:
+
+How many female stocks?
+
+Return:
+
+{
+    "type": "inventory",
+    "response_type": "total",
+    "item_name": "",
+    "gender": "female",
+    "size": "",
+    "availability": "all"
+}
+
+User:
+
+How many low stocks?
+
+Return:
+
+{
+    "type": "inventory",
+    "response_type": "total",
+    "item_name": "",
+    "gender": "",
+    "size": "",
+    "availability": "low_stock"
+}
+
+User:
+
+Show low stock BSBA Uniform Set
+
+Return:
+
+{
+    "type": "inventory",
+    "response_type": "list",
+    "item_name": "BSBA Uniform Set",
+    "gender": "",
+    "size": "",
+    "availability": "low_stock"
+}
+
+User:
+
+show all items
+
+Return:
+
+{
+    "type": "inventory",
+    "response_type": "list",
+    "item_name": "",
+    "gender": "",
+    "size": "",
+    "availability": "all"
+}
+
+User:
+
+how many items are there
+
+Return:
 
 {
     "type": "inventory",
@@ -417,10 +987,33 @@ JSON format for inventory:
     "availability": "all"
 }
 
-Conversation history:
+==================================================
+FINAL RULES
+==================================================
+
+Return ONLY valid JSON.
+
+Do not return Markdown.
+
+Do not return ```json.
+
+Do not explain your answer.
+
+Do not calculate inventory.
+
+Do not invent values.
+
+Do not guess missing filters.
+
+When a value is not specified by the user and does not exist in the existing context, use an empty string.
+
+==================================================
+CONVERSATION HISTORY
+==================================================
 PROMPT;
 
     foreach ($history as $item) {
+
         $role = $item['role'] ?? '';
         $text = $item['message'] ?? '';
 
@@ -449,9 +1042,36 @@ PROMPT;
 */
 
 function parseOllamaResponse($content) {
+
     $content = trim($content);
 
-    $data = json_decode($content, true);
+    /*
+    |--------------------------------------------------------------------------
+    | Remove accidental markdown code fences
+    |--------------------------------------------------------------------------
+    */
+
+    if (strpos($content, '```') === 0) {
+
+        $content = preg_replace(
+            '/^```(?:json)?\s*/i',
+            '',
+            $content
+        );
+
+        $content = preg_replace(
+            '/\s*```$/',
+            '',
+            $content
+        );
+
+        $content = trim($content);
+    }
+
+    $data = json_decode(
+        $content,
+        true
+    );
 
     if (is_array($data)) {
         return $data;
@@ -482,23 +1102,11 @@ function filterInventory($inventory, $filters) {
         $sizeCode = trim($row['size_code'] ?? '');
         $quantity = (int)($row['quantity'] ?? 0);
 
-        /*
-        |--------------------------------------------------------------------------
-        | Item name
-        |--------------------------------------------------------------------------
-        */
-
         if ($itemName !== '') {
             if (stripos($rowItemName, $itemName) === false) {
                 continue;
             }
         }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Gender
-        |--------------------------------------------------------------------------
-        */
 
         if ($gender === 'male') {
             if (strpos($sizeCode, '(M)') !== 0) {
@@ -511,12 +1119,6 @@ function filterInventory($inventory, $filters) {
                 continue;
             }
         }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Size
-        |--------------------------------------------------------------------------
-        */
 
         if ($size !== '') {
             $actualSize = str_replace(
@@ -535,14 +1137,14 @@ function filterInventory($inventory, $filters) {
             }
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Availability
-        |--------------------------------------------------------------------------
-        */
-
         if ($availability === 'available') {
             if ($quantity <= 0) {
+                continue;
+            }
+        }
+
+        if ($availability === 'low_stock') {
+            if ($quantity <= 0 || $quantity >= 50) {
                 continue;
             }
         }
@@ -624,23 +1226,11 @@ function buildInventoryTotal($inventory, $filters) {
     $size = normalizeSize($filters['size'] ?? '');
     $availability = normalizeAvailability($filters['availability'] ?? 'all');
 
-    /*
-    |--------------------------------------------------------------------------
-    | Description
-    |--------------------------------------------------------------------------
-    */
-
     if ($itemName !== '') {
         $description = $itemName;
     } else {
         $description = 'inventory';
     }
-
-    /*
-    |--------------------------------------------------------------------------
-    | Gender
-    |--------------------------------------------------------------------------
-    */
 
     if ($gender !== '') {
         $description =
@@ -648,12 +1238,6 @@ function buildInventoryTotal($inventory, $filters) {
             ' ' .
             $description;
     }
-
-    /*
-    |--------------------------------------------------------------------------
-    | Size
-    |--------------------------------------------------------------------------
-    */
 
     if ($size !== '') {
         $displaySize = ucfirst($size);
@@ -664,25 +1248,15 @@ function buildInventoryTotal($inventory, $filters) {
             $description;
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | Availability
-    |--------------------------------------------------------------------------
-    */
-
     if ($availability === 'available') {
         $description .= ' in stock';
+    } elseif ($availability === 'low_stock') {
+        $description .= ' low stock';
     } elseif ($availability === 'out_of_stock') {
         $description .= ' out of stock';
     } else {
         $description .= ' items';
     }
-
-    /*
-    |--------------------------------------------------------------------------
-    | Grammar
-    |--------------------------------------------------------------------------
-    */
 
     if ($total == 1) {
         $description = rtrim($description, 's');
