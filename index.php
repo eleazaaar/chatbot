@@ -1,12 +1,20 @@
 <?php
 
+ob_start();
+
+include_once 'helper.php';
+
+ob_end_clean();
+
+header('Content-Type: text/html; charset=utf-8');
+
+$chatHistory = getConversationHistory();
+
 /*
 |--------------------------------------------------------------------------
 | HTML CHAT INTERFACE
 |--------------------------------------------------------------------------
 */
-
-header('Content-Type: text/html; charset=utf-8');
 
 ?>
 
@@ -187,6 +195,21 @@ header('Content-Type: text/html; charset=utf-8');
 
     /*
     |--------------------------------------------------------------------------
+    | CHAT HISTORY FROM PHP SESSION
+    |--------------------------------------------------------------------------
+    */
+
+    const chatHistory = <?= json_encode(
+        $chatHistory,
+        JSON_HEX_TAG |
+        JSON_HEX_APOS |
+        JSON_HEX_AMP |
+        JSON_HEX_QUOT
+    ); ?>;
+
+
+    /*
+    |--------------------------------------------------------------------------
     | ADD MESSAGE
     |--------------------------------------------------------------------------
     */
@@ -234,59 +257,36 @@ header('Content-Type: text/html; charset=utf-8');
     |--------------------------------------------------------------------------
     */
 
-    async function loadHistory()
+    function loadHistory()
     {
-        try {
+        chatBox.innerHTML = '';
 
-            const response =
-                await fetch('helper.php?action=history', {
-                    method: 'GET',
-                    cache: 'no-store'
-                });
+        if (
+            Array.isArray(chatHistory) &&
+            chatHistory.length > 0
+        ) {
 
-            const result =
-                await response.json();
+            chatHistory.forEach(function(row) {
 
-            chatBox.innerHTML = '';
+                if (row.role === 'user') {
 
-            if (
-                result.status &&
-                Array.isArray(result.history) &&
-                result.history.length > 0
-            ) {
+                    addMessage(
+                        row.message,
+                        'user'
+                    );
 
-                result.history.forEach(function(row) {
+                } else if (row.role === 'assistant') {
 
-                    if (row.role === 'user') {
+                    addMessage(
+                        row.message,
+                        'bot'
+                    );
 
-                        addMessage(
-                            row.message,
-                            'user'
-                        );
+                }
 
-                    } else {
+            });
 
-                        addMessage(
-                            row.message,
-                            'bot'
-                        );
-
-                    }
-
-                });
-
-            } else {
-
-                showWelcomeMessage();
-
-            }
-
-        } catch (error) {
-
-            console.error(
-                'Unable to load conversation history:',
-                error
-            );
+        } else {
 
             showWelcomeMessage();
 
@@ -416,15 +416,10 @@ header('Content-Type: text/html; charset=utf-8');
 
                 const response =
                     await fetch(
-                        'helper.php',
+                        'helper.php?action=new_chat',
                         {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type':
-                                    'application/x-www-form-urlencoded'
-                            },
-                            body:
-                                'action=new_chat'
+                            method: 'GET',
+                            cache: 'no-store'
                         }
                     );
 
