@@ -1,17 +1,6 @@
 <?php
-ob_start();
-include_once 'helper.php';
-ob_end_clean();
-
 header('Content-Type: text/html; charset=utf-8');
-$chatHistory = getConversationHistory();
-
-/*
-|--------------------------------------------------------------------------
-| HTML CHAT INTERFACE
-|--------------------------------------------------------------------------
-*/ ?>
-
+?>
 <!DOCTYPE html>
 <html>
 <head>
@@ -107,42 +96,37 @@ $chatHistory = getConversationHistory();
 <div class="chat-container">
     <div class="chat-header">
         <span>Inventory AI Assistant</span>
-        <button type="button" id="new-chat-button" class="new-chat-button"> New Chat </button>
+        <button type="button" id="new-chat-button" class="new-chat-button">New Chat</button>
     </div>
 
     <div id="chat-box" class="chat-box"></div>
 
     <form id="chat-form" class="chat-input">
         <input type="text" id="message" placeholder="Ask about inventory..." autocomplete="off">
-        <button type="submit" id="send-button"> Send </button>
+        <button type="submit" id="send-button">Send</button>
     </form>
 </div>
 
-<script>
-    const form = document.getElementById('chat-form');
-    const input = document.getElementById('message');
-    const chatBox = document.getElementById('chat-box');
-    const sendButton = document.getElementById('send-button');
-    const newChatButton = document.getElementById('new-chat-button');
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 
-    /*
-    |--------------------------------------------------------------------------
-    | CHAT HISTORY FROM PHP SESSION
-    |--------------------------------------------------------------------------
-    */
-    const chatHistory = <?= json_encode($chatHistory,JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT ); ?>;
+<script>
+    const form = $('#chat-form');
+    const input = $('#message');
+    const chatBox = $('#chat-box');
+    const sendButton = $('#send-button');
+    const newChatButton = $('#new-chat-button');
 
     /*
     |--------------------------------------------------------------------------
     | ADD MESSAGE
     |--------------------------------------------------------------------------
     */
-    function addMessage(message, type) {
-        const div = document.createElement('div');
-        div.className = 'message ' + type;
-        div.textContent = message;
-        chatBox.appendChild(div);
-        chatBox.scrollTop = chatBox.scrollHeight;
+    function addMessage(message,type) {
+        const div = $('<div>');
+        div.addClass('message ' + type);
+        div.text(message);
+        chatBox.append(div);
+        chatBox.scrollTop(chatBox[0].scrollHeight);
         return div;
     }
 
@@ -152,8 +136,8 @@ $chatHistory = getConversationHistory();
     |--------------------------------------------------------------------------
     */
     function showWelcomeMessage() {
-        chatBox.innerHTML = '';
-        addMessage('Hello! How can I help you with the inventory?', 'bot');
+        chatBox.html('');
+        addMessage('Hello! How can I help you with the inventory?','bot');
     }
 
     /*
@@ -162,19 +146,33 @@ $chatHistory = getConversationHistory();
     |--------------------------------------------------------------------------
     */
     function loadHistory() {
-        chatBox.innerHTML = '';
-
-        if (Array.isArray(chatHistory) && chatHistory.length > 0) {
-            chatHistory.forEach(function(row) {
-                if (row.role === 'user') {
-                    addMessage(row.message, 'user');
-                } else if (row.role === 'assistant') {
-                    addMessage(row.message,'bot');
+        $.ajax({
+            url: 'helper.php',
+            type: 'GET',
+            data: {
+                action: 'get_history'
+            },
+            dataType: 'JSON',
+            cache: false,
+            success: function(result) {
+                chatBox.html('');
+                if (result.status && Array.isArray(result.history) && result.history.length > 0) {
+                    $.each(result.history,function(index,row) {
+                        if (row.role === 'user') {
+                            addMessage(row.message,'user');
+                        } else if (row.role === 'assistant') {
+                            addMessage(row.message,'bot');
+                        }
+                    });
+                } else {
+                    showWelcomeMessage();
                 }
-            });
-        } else {
-            showWelcomeMessage();
-        }
+            },
+            error: function(xhr,status,error) {
+                console.error(error);
+                showWelcomeMessage();
+            }
+        });
     }
 
     /*
@@ -182,47 +180,42 @@ $chatHistory = getConversationHistory();
     | SEND MESSAGE
     |--------------------------------------------------------------------------
     */
-    form.addEventListener('submit', async function(e) {
+    form.on('submit',function(e) {
         e.preventDefault();
 
-        const message = input.value.trim();
-        if (!message) return;
-
+        const message = $.trim(input.val());
+        if (!message) return; 
         addMessage(message,'user');
-
-        input.value = '';
-        input.disabled = true;
-        sendButton.disabled = true;
-
+        input.val('');
+        input.prop('disabled',true);
+        sendButton.prop('disabled',true);
         const thinkingMessage = addMessage('Thinking...','bot');
-        try {
-            const response = await fetch('helper.php', {
-                method: 'POST',
-                headers: {
-                    'Content-Type':
-                    'application/x-www-form-urlencoded'
-                },
-                body: 'message=' + encodeURIComponent(message)
-            });
-
-            const result = await response.json();
-            thinkingMessage.remove();
-
-            if (result.reply) {
-                addMessage(result.reply,'bot');
-            } else {
-                addMessage('Sorry, I could not process your request.','bot');
+        $.ajax({
+            url: 'helper.php',
+            type: 'POST',
+            data: {
+                message: message
+            },
+            dataType: 'JSON',
+            success: function(result) {
+                thinkingMessage.remove();
+                if (result.status && result.reply) {
+                    addMessage(result.reply,'bot');
+                } else {
+                    addMessage(result.reply || 'Sorry, I could not process your request.','bot');
+                }
+            },
+            error: function(xhr,status,error) {
+                thinkingMessage.remove();
+                addMessage('Unable to connect to the chatbot.','bot');
+                console.error(error);
+            },
+            complete: function() {
+                input.prop('disabled',false);
+                sendButton.prop('disabled',false);
+                input.focus();
             }
-
-        } catch (error) {
-            thinkingMessage.remove();
-            addMessage('Unable to connect to the chatbot.','bot');
-            console.error(error);
-        } finally {
-            input.disabled = false;
-            sendButton.disabled = false;
-            input.focus();
-        }
+        });
     });
 
     /*
@@ -230,34 +223,37 @@ $chatHistory = getConversationHistory();
     | NEW CHAT
     |--------------------------------------------------------------------------
     */
-    newChatButton.addEventListener('click', async function() {
+    newChatButton.on('click',function() {
         const confirmed = confirm('Start a new chat? Your current chat will no longer be shown here.');
         if (!confirmed) return;
 
-        try {
-            newChatButton.disabled = true;
-            const response =
-                await fetch('helper.php?action=new_chat',{
-                    method: 'GET',
-                    cache: 'no-store'
-                });
-
-            const result = await response.json();
-            if (result.status) {
-                chatBox.innerHTML = '';
-                addMessage('Hello! How can I help you with the inventory?','bot');
-                input.value = '';
-                input.focus();
-            } else {
+        newChatButton.prop('disabled',true);
+        $.ajax({
+            url: 'helper.php',
+            type: 'GET',
+            data: {
+                action: 'new_chat'
+            },
+            dataType: 'JSON',
+            cache: false,
+            success: function(result) {
+                if (result.status) {
+                    chatBox.html('');
+                    addMessage('Hello! How can I help you with the inventory?','bot');
+                    input.val('');
+                    input.focus();
+                } else {
+                    alert('Unable to start a new chat.');
+                }
+            },
+            error: function(xhr,status,error) {
+                console.error(error);
                 alert('Unable to start a new chat.');
+            },
+            complete: function() {
+                newChatButton.prop('disabled',false);
             }
-
-        } catch (error) {
-            console.error(error);
-            alert('Unable to start a new chat.');
-        } finally {
-            newChatButton.disabled = false;
-        }
+        });
     });
 
     /*
@@ -265,7 +261,7 @@ $chatHistory = getConversationHistory();
     | LOAD HISTORY WHEN PAGE OPENS
     |--------------------------------------------------------------------------
     */
-    document.addEventListener('DOMContentLoaded', function() {
+    $(document).ready(function() {
         loadHistory();
     });
 </script>

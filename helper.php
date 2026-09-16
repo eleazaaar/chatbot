@@ -2,1467 +2,847 @@
 session_start();
 require_once 'database.php';
 require_once 'inventory.php';
-$conn = Database::connection();
 
 header('Content-Type: application/json; charset=utf-8');
 
-/*
-|--------------------------------------------------------------------------
-| SESSION
-|--------------------------------------------------------------------------
-*/
-function getDefaultInventoryContext() {
-    return [
-        'item_name' => '',
-        'gender' => '',
-        'size' => '',
-        'availability' => 'all',
-        'response_type' => 'total'
-    ];
-}
+class InventoryChatbot {
+    private $conn, $inventory;
+    public function __construct() {
+        date_default_timezone_set('Asia/Manila');
+        $this->conn = Database::connection();
+        $this->inventory = new Inventory();
 
-if (!isset($_SESSION['chat_session_id'])) {
-    $_SESSION['chat_session_id'] = session_id();
-}
+        if (!isset($_SESSION['chat_session_id'])) {
+            $_SESSION['chat_session_id'] = session_id();
+        }
 
-if (!isset($_SESSION['inventory_context'])) {
-    $_SESSION['inventory_context'] = getDefaultInventoryContext();
-}
-
-/*
-|--------------------------------------------------------------------------
-| Inventory context
-|--------------------------------------------------------------------------
-*/
-function getInventoryContext() {
-    if (!isset($_SESSION['inventory_context'])) {
-        $_SESSION['inventory_context'] = getDefaultInventoryContext();
+        if (!isset($_SESSION['inventory_context'])) {
+            $_SESSION['inventory_context'] = $this->getDefaultInventoryContext();
+        }
     }
 
-    return $_SESSION['inventory_context'];
-}
-
-function saveInventoryContext($context) {
-    $_SESSION['inventory_context'] = $context;
-}
-
-/*
-|--------------------------------------------------------------------------
-| Conversation
-|--------------------------------------------------------------------------
-*/
-function saveConversation($role, $message) {
-    if (!isset($_SESSION['conversation'])) {
-        $_SESSION['conversation'] = [];
+    private function getDefaultInventoryContext() {
+        return [
+            'item_name' => '',
+            'gender' => '',
+            'size' => '',
+            'availability' => 'all',
+            'response_type' => 'total'
+        ];
     }
 
-    $_SESSION['conversation'][] = [
-        'role' => $role,
-        'message' => $message
-    ];
+    private function getInventoryContext() {
+        if (!isset($_SESSION['inventory_context'])) {
+            $_SESSION['inventory_context'] = $this->getDefaultInventoryContext();
+        }
 
-    if (count($_SESSION['conversation']) > 10) {
-        array_shift($_SESSION['conversation']);
-    }
-}
-
-function getConversationHistory() {
-    return $_SESSION['conversation'] ?? [];
-}
-
-/*
-|--------------------------------------------------------------------------
-| Ask Ollama
-|--------------------------------------------------------------------------
-*/
-function askOllama($messages) {
-    $apiKey = '141a9f1faf5f46b99a2d716ccbe6c6a6.TX1semH-ECfPQ4rkjYgb1mrf';
-
-    $url = 'https://ollama.com/api/chat';
-
-    $data = [
-        'model' => 'gpt-oss:20b-cloud',
-        'messages' => $messages,
-        'stream' => false,
-        'format' => 'json',
-        'options' => [
-            'temperature' => 0
-        ]
-    ];
-
-    $jsonData = json_encode($data);
-
-    if ($jsonData === false) {
-        return ['success' => false,'content' => '','error' => 'Unable to encode Ollama request.'];
+        return $_SESSION['inventory_context'];
     }
 
-    $ch = curl_init($url);
+    private function saveInventoryContext($context) {
+        $_SESSION['inventory_context'] = $context;
+    }
 
-    curl_setopt_array($ch, [
-        CURLOPT_POST => true,
-        CURLOPT_POSTFIELDS => $jsonData,
-        CURLOPT_HTTPHEADER => [
-            'Content-Type: application/json',
-            'Authorization: Bearer ' . $apiKey
-        ],
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_CONNECTTIMEOUT => 10,
-        CURLOPT_TIMEOUT => 60
-    ]);
-    $response = curl_exec($ch);
+    private function saveConversation($role, $message) {
+        if (!isset($_SESSION['conversation'])) {
+            $_SESSION['conversation'] = [];
+        }
 
-    if ($response === false) {
-        $error = curl_error($ch);
+        $_SESSION['conversation'][] = [
+            'role' => $role,
+            'message' => $message
+        ];
+
+        if (count($_SESSION['conversation']) > 10) {
+            array_shift($_SESSION['conversation']);
+        }
+    }
+
+    public function getConversationHistory() {
+        return $_SESSION['conversation'] ?? [];
+    }
+
+    private function askOllama($messages) {
+        $apiKey = '141a9f1faf5f46b99a2d716ccbe6c6a6.TX1semH-ECfPQ4rkjYgb1mrf';
+        $url = 'https://ollama.com/api/chat';
+
+        $data = [
+            'model' => 'gpt-oss:20b-cloud',
+            'messages' => $messages,
+            'stream' => false,
+            'format' => 'json',
+            'options' => [
+                'temperature' => 0
+            ]
+        ];
+
+        $jsonData = json_encode($data);
+
+        if ($jsonData === false) {
+            return [
+                'success' => false,
+                'content' => '',
+                'error' => 'Unable to encode Ollama request.'
+            ];
+        }
+
+        $ch = curl_init($url);
+
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $jsonData,
+            CURLOPT_HTTPHEADER => [
+                'Content-Type: application/json',
+                'Authorization: Bearer ' . $apiKey
+            ],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 10,
+            CURLOPT_TIMEOUT => 60
+        ]);
+
+        $response = curl_exec($ch);
+
+        if ($response === false) {
+            $error = curl_error($ch);
+            curl_close($ch);
+
+            return [
+                'success' => false,
+                'content' => '',
+                'error' => $error
+            ];
+        }
+
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
-        return ['success' => false,'content' => '','error' => $error];
+
+        if ($httpCode < 200 || $httpCode >= 300) {
+            return [
+                'success' => false,
+                'content' => '',
+                'error' => 'Ollama HTTP error: ' . $httpCode
+            ];
+        }
+
+        $result = json_decode($response, true);
+
+        if (!is_array($result)) {
+            return [
+                'success' => false,
+                'content' => '',
+                'error' => 'Invalid JSON response from Ollama.'
+            ];
+        }
+
+        if (!isset($result['message']) || !isset($result['message']['content'])) {
+            return [
+                'success' => false,
+                'content' => '',
+                'error' => 'Ollama response does not contain message content.'
+            ];
+        }
+
+        return [
+            'success' => true,
+            'content' => $result['message']['content'],
+            'error' => ''
+        ];
     }
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
 
-    if ($httpCode < 200 || $httpCode >= 300) {
-        return ['success' => false,'content' => '','error' => 'Ollama HTTP error: ' . $httpCode];
+    private function normalizeSize($size) {
+        $size = strtolower(trim($size));
+
+        if ($size === '') {
+            return '';
+        }
+
+        switch ($size) {
+            case 'xs':
+            case 'x-small':
+            case 'extra small':
+            case 'extra-small':
+                return 'xsmall';
+
+            case 's':
+            case 'small':
+                return 'small';
+
+            case 'm':
+            case 'medium':
+                return 'medium';
+
+            case 'l':
+            case 'large':
+                return 'large';
+
+            case 'xl':
+            case 'x-large':
+            case 'extra large':
+            case 'extra-large':
+                return 'xlarge';
+
+            default:
+                return $size;
+        }
     }
 
-    $result = json_decode($response, true);
-    if (!is_array($result)) {
-        return ['success' => false,'content' => '','error' => 'Invalid JSON response from Ollama.'];
-    }
+    private function normalizeGender($gender) {
+        $gender = strtolower(trim($gender));
 
-    if (!isset($result['message']) || !isset($result['message']['content'])) {
-        return ['success' => false,'content' => '','error' => 'Ollama response does not contain message content.'];
-    }
-    return ['success' => true,'content' => $result['message']['content'],'error' => ''];
-}
+        if ($gender === 'm' || $gender === 'male' || $gender === 'men' || $gender === 'man') {
+            return 'male';
+        }
 
-/*
-|--------------------------------------------------------------------------
-| Normalize size
-|--------------------------------------------------------------------------
-*/
-function normalizeSize($size) {
-    $size = strtolower(trim($size));
+        if ($gender === 'f' || $gender === 'female' || $gender === 'women' || $gender === 'woman') {
+            return 'female';
+        }
 
-    if ($size === '') {
         return '';
     }
 
-    switch ($size) {
-        case 'xs':
-        case 'x-small':
-        case 'extra small':
-        case 'extra-small':
-            return 'xsmall';
+    private function normalizeAvailability($availability) {
+        $availability = strtolower(trim($availability));
 
-        case 's':
-        case 'small':
-            return 'small';
+        if ($availability === 'available' || $availability === 'in stock' || $availability === 'instock') {
+            return 'available';
+        }
 
-        case 'm':
-        case 'medium':
-            return 'medium';
+        if ($availability === 'low_stock' || $availability === 'low stock' || $availability === 'low stocks' || $availability === 'low inventory' || $availability === 'below 50' || $availability === 'less than 50') {
+            return 'low_stock';
+        }
 
-        case 'l':
-        case 'large':
-            return 'large';
+        if ($availability === 'out_of_stock' || $availability === 'out of stock' || $availability === 'outofstock') {
+            return 'out_of_stock';
+        }
 
-        case 'xl':
-        case 'x-large':
-        case 'extra large':
-        case 'extra-large':
-            return 'xlarge';
-
-        default:
-            return $size;
-    }
-}
-
-/*
-|--------------------------------------------------------------------------
-| Normalize gender
-|--------------------------------------------------------------------------
-*/
-
-function normalizeGender($gender) {
-    $gender = strtolower(trim($gender));
-
-    if ($gender === 'm' || $gender === 'male' || $gender === 'men' || $gender === 'man') {
-        return 'male';
+        return 'all';
     }
 
-    if ($gender === 'f' || $gender === 'female' || $gender === 'women' || $gender === 'woman') {
-        return 'female';
+    private function normalizeResponseType($responseType) {
+        $responseType = strtolower(trim($responseType));
+
+        if ($responseType === 'list' || $responseType === 'show' || $responseType === 'display') {
+            return 'list';
+        }
+
+        return 'total';
     }
 
-    return '';
-}
+    private function analyzeInventoryRequest($message, $context, $history) {
+        $systemPrompt = <<<'PROMPT'
+        You are the request interpreter for an inventory management chatbot.
 
-/*
-|--------------------------------------------------------------------------
-| Normalize availability
-|--------------------------------------------------------------------------
-*/
+        Your job is to understand what the user means from the current message and conversation history.
 
-function normalizeAvailability($availability) {
-    $availability = strtolower(trim($availability));
+        You do NOT access the database.
+        You do NOT calculate inventory quantities.
+        You do NOT guess inventory values.
 
-    if ($availability === 'available' || $availability === 'in stock' || $availability === 'instock') {
-        return 'available';
+        Return ONLY valid JSON.
+
+        For inventory requests, ALWAYS return all of these fields:
+
+        {
+            "type": "inventory",
+            "response_type": "total",
+            "item_name": "",
+            "gender": "",
+            "size": "",
+            "availability": "all"
+        }
+
+        Allowed type values:
+        inventory
+        greeting
+        help
+        general
+        chat
+
+        Allowed response_type values:
+        total
+        list
+
+        Allowed gender values:
+        male
+        female
+        ""
+
+        Allowed size values:
+        XSmall
+        Small
+        Medium
+        Large
+        XLarge
+        ""
+
+        Allowed availability values:
+        all
+        available
+        low_stock
+        out_of_stock
+
+        Important conversation rules:
+
+        1. Use the previous inventory context when the user asks a follow-up question.
+
+        2. Words such as "that", "this", "it", "those", "the result", "the stock", "the stocks", "same", and "previous" normally refer to the previous inventory request.
+
+        3. If the user asks a yes/no question about the previous inventory result, understand the question using the previous inventory context.
+
+        4. Do not remove an existing item_name, gender, size, or availability unless the user clearly changes it.
+
+        5. If the user asks about "all items", "all inventory", or "everything", remove the previous item_name restriction and use item_name = "".
+
+        6. If the user asks "is that for BSBA only or all items?" and the previous item_name is "BSBA Uniform Set", this is a follow-up about the previous result. Return:
+        {
+            "type": "chat",
+            "response": "Yes, that is for BSBA Uniform Set only."
+        }
+
+        7. If the user asks "does that include all items?" and the previous item_name is specific, return:
+        {
+            "type": "chat",
+            "response": "No, that is only for the previously requested item."
+        }
+
+        8. If the user asks "what about all items?" or "show all items", use:
+        item_name = ""
+        and process it as an inventory request.
+
+        9. "available" means quantity greater than 0.
+
+        10. "low stock" means quantity greater than 0 and less than 50.
+
+        11. "out of stock" means quantity less than or equal to 0.
+
+        12. "show", "list", "display", "what are", and similar wording normally means response_type = "list".
+
+        13. "how many", "how much", "total", and similar wording normally means response_type = "total".
+
+        14. A greeting should return:
+        {
+            "type": "greeting"
+        }
+
+        15. A help request should return:
+        {
+            "type": "help"
+        }
+
+        16. If the user says "eleazar", return:
+        {
+            "type": "chat",
+            "response": "So cool!"
+        }
+
+        17. For normal conversation that is not an inventory request, use:
+        {
+            "type": "chat",
+            "response": "..."
+        }
+
+        18. Do not invent database results.
+
+        Previous inventory context:
+        PROMPT;
+
+        $systemPrompt .= "\n" . json_encode($context);
+
+        $systemPrompt .= "\n\nPrevious conversation:\n";
+
+        foreach ($history as $entry) {
+            $systemPrompt .= ucfirst($entry['role']) . ': ' . $entry['message'] . "\n";
+        }
+
+        $systemPrompt .= "\nCurrent user message:\n" . $message;
+
+        $messages = [
+            [
+                'role' => 'system',
+                'content' => $systemPrompt
+            ],
+            [
+                'role' => 'user',
+                'content' => $message
+            ]
+        ];
+
+        return $this->askOllama($messages);
     }
 
-    if ($availability === 'low_stock' || $availability === 'low stock' || $availability === 'low stocks' || $availability === 'low inventory' || $availability === 'below 50' || $availability === 'less than 50') {
-        return 'low_stock';
+    private function generateNaturalResponse($message, $context, $result) {
+        $systemPrompt = <<<'PROMPT'
+        You are the conversational response part of an inventory management chatbot.
+
+        Respond naturally, briefly, and conversationally, like a helpful human assistant.
+
+        The inventory result provided to you is the source of truth.
+
+        Rules:
+
+        - Do not invent quantities or inventory information.
+        - Do not change numbers.
+        - Do not calculate different numbers.
+        - Do not return JSON.
+        - Do not mention that you are an AI.
+        - Do not say "according to the database".
+        - Do not unnecessarily repeat the entire result.
+        - Answer the user's actual question directly.
+        - Understand words such as "that", "this", "it", "those", and "the result" using the conversation context.
+        - If the user asks a yes/no question, answer yes or no directly.
+        - If the user asks for clarification about the scope of a result, clearly state which item the result applies to.
+        - If the user asks for all items but the provided result is only for one item, explain that the previous result was only for that item.
+        - Keep the response natural and concise.
+
+        Previous inventory context:
+        PROMPT;
+
+        $systemPrompt .= "\n" . json_encode($context);
+
+        $systemPrompt .= "\n\nUser message:\n" . $message;
+        $systemPrompt .= "\n\nActual inventory result:\n" . $result;
+
+        $messages = [
+            [
+                'role' => 'system',
+                'content' => $systemPrompt
+            ],
+            [
+                'role' => 'user',
+                'content' => $message
+            ]
+        ];
+
+        $ollama = $this->askOllama($messages);
+
+        if (!$ollama['success']) {
+            return $result;
+        }
+
+        $response = trim($ollama['content']);
+
+        $decoded = json_decode($response, true);
+
+        if (is_array($decoded) && isset($decoded['response'])) {
+            $response = trim($decoded['response']);
+        }
+
+        if ($response === '') {
+            return $result;
+        }
+
+        return $response;
     }
 
-    if ($availability === 'out_of_stock' || $availability === 'out of stock' || $availability === 'outofstock') {
-        return 'out_of_stock';
-    }
+    private function parseOllamaResponse($content) {
+        $data = json_decode($content, true);
 
-    return 'all';
-}
+        if (!is_array($data)) {
+            return [];
+        }
 
-/*
-|--------------------------------------------------------------------------
-| Normalize response type
-|--------------------------------------------------------------------------
-*/
-
-function normalizeResponseType($responseType) {
-    $responseType = strtolower(trim($responseType));
-
-    if ($responseType === 'list' || $responseType === 'show' || $responseType === 'display') {
-        return 'list';
-    }
-
-    return 'total';
-}
-
-/*
-|--------------------------------------------------------------------------
-| Analyze inventory request
-|--------------------------------------------------------------------------
-*/
-function analyzeInventoryRequest($message, $context, $history) {
-    $systemPrompt = <<<PROMPT
-    You are an inventory request interpreter for a PHP inventory chatbot.
-
-    IMPORTANT:
-
-    Your ONLY job is to understand the user's request and return JSON filters.
-
-    You DO NOT have access to the inventory database.
-
-    You MUST NOT calculate inventory quantities.
-
-    You MUST NOT guess inventory values.
-
-    You MUST NOT invent gender, size, availability, or item names.
-
-    PHP will use your JSON output to query and filter the actual database.
-
-    ==================================================
-    MANDATORY JSON STRUCTURE
-    ==================================================
-
-    For EVERY inventory request, you MUST return ALL of these fields:
-
-    {
-        "type": "inventory",
-        "response_type": "total",
-        "item_name": "",
-        "gender": "",
-        "size": "",
-        "availability": "all"
-    }
-
-    The "type" field is REQUIRED.
-
-    NEVER omit the "type" field.
-
-    For inventory requests:
-
-    "type": "inventory"
-
-    For greetings:
-
-    "type": "greeting"
-
-    For help requests:
-
-    "type": "help"
-
-    For general conversation:
-
-    "type": "general"
-
-    For chat commands:
-
-    "type": "chat"
-
-    ==================================================
-    CURRENT INVENTORY CONTEXT
-    ==================================================
-
-    item_name: {$context['item_name']}
-    gender: {$context['gender']}
-    size: {$context['size']}
-    availability: {$context['availability']}
-    response_type: {$context['response_type']}
-
-    ==================================================
-    ALLOWED VALUES
-    ==================================================
-
-    gender:
-
-    male
-    female
-    empty
-
-    size:
-
-    XSmall
-    Small
-    Medium
-    Large
-    XLarge
-    empty
-
-    availability:
-
-    all
-    available
-    low_stock
-    out_of_stock
-
-    response_type:
-
-    total
-    list
-
-    ==================================================
-    CRITICAL RULE: NEVER GUESS
-    ==================================================
-
-    If the user does NOT explicitly provide a value, DO NOT invent one.
-
-    For example:
-
-    User:
-    BSBA Uniform Set
-
-    Correct:
-
-    {
-        "type": "inventory",
-        "response_type": "total",
-        "item_name": "BSBA Uniform Set",
-        "gender": "",
-        "size": "",
-        "availability": "all"
-    }
-
-    WRONG:
-
-    {
-        "type": "inventory",
-        "response_type": "total",
-        "item_name": "BSBA Uniform Set",
-        "gender": "Unisex",
-        "size": "M",
-        "availability": "available"
-    }
-
-    Do NOT use "Unisex".
-
-    Do NOT assume Medium.
-
-    Do NOT assume available.
-
-    Do NOT assume out_of_stock.
-
-    Do NOT infer values from the item name.
-
-    An empty value means the user did not specify that filter.
-
-    ==================================================
-    ITEM NAME RULES
-    ==================================================
-
-    If the user explicitly mentions an inventory item, use that item name.
-
-    Example:
-
-    User:
-    BSBA Uniform Set
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "total",
-        "item_name": "BSBA Uniform Set",
-        "gender": "",
-        "size": "",
-        "availability": "all"
-    }
-
-    If the user does not mention an item and the existing context contains an item, preserve the existing item.
-
-    If the user says "all items", clear item_name:
-
-    "item_name": ""
-
-    Do NOT invent an item name.
-
-    ==================================================
-    GENDER RULES
-    ==================================================
-
-    Only set gender when the user explicitly asks for male or female.
-
-    Examples:
-
-    "male"
-
-    gender = "male"
-
-    "female"
-
-    gender = "female"
-
-    "male stocks"
-
-    gender = "male"
-
-    "female stocks"
-
-    gender = "female"
-
-    If gender is not mentioned, preserve the existing context.
-
-    If there is no existing gender, use:
-
-    "gender": ""
-
-    NEVER return:
-
-    "gender": "Unisex"
-
-    unless "Unisex" is explicitly part of the user's request and Unisex is supported by PHP.
-
-    For this chatbot, the only valid gender values are:
-
-    male
-    female
-    empty
-
-    ==================================================
-    SIZE RULES
-    ==================================================
-
-    Only set size when the user explicitly mentions a supported size.
-
-    Supported sizes:
-
-    XSmall
-    Small
-    Medium
-    Large
-    XLarge
-
-    Examples:
-
-    "Small"
-
-    size = "Small"
-
-    "male Small"
-
-    size = "Small"
-
-    "Medium"
-
-    size = "Medium"
-
-    If the user does not mention a size, preserve the existing context.
-
-    If there is no existing size, use:
-
-    "size": ""
-
-    If the user says:
-
-    "all sizes"
-
-    clear the size:
-
-    "size": ""
-
-    NEVER guess a size.
-
-    For example:
-
-    User:
-    BSBA Uniform Set
-
-    DO NOT return:
-
-    "size": "Medium"
-
-    Return:
-
-    "size": ""
-
-    ==================================================
-    AVAILABILITY RULES
-    ==================================================
-
-    Only change availability when the user explicitly requests availability filtering.
-
-    If the user says:
-
-    "available"
-    "only available"
-    "available only"
-    "in stock"
-    "in stock only"
-    "only in stock"
-
-    use:
-
-    "availability": "available"
-
-    Available means:
-
-    quantity > 0
-
-    If the user says:
-
-    "low stock"
-    "low stocks"
-    "low inventory"
-    "below 50"
-    "less than 50"
-
-    use:
-
-    "availability": "low_stock"
-
-    Low stock means:
-
-    quantity > 0
-    AND
-    quantity < 50
-
-    Therefore:
-
-    0 = out of stock
-    1-49 = low stock
-    50 or more = normal stock
-
-    Do NOT include quantity 0 as low stock.
-
-    If the user says:
-
-    "out of stock"
-    "unavailable"
-    "not available"
-
-    use:
-
-    "availability": "out_of_stock"
-
-    If the user does not mention availability, preserve the existing context.
-
-    If there is no existing availability, use:
-
-    "availability": "all"
-
-    NEVER determine availability from the item name.
-
-    NEVER assume an item is in stock.
-
-    NEVER assume an item is out of stock.
-
-    ==================================================
-    RESPONSE TYPE RULES
-    ==================================================
-
-    If the user asks:
-
-    "how many"
-    "how much"
-    "how many are there"
-    "what is the quantity"
-    "what's the quantity"
-    "quantity"
-
-    use:
-
-    "response_type": "total"
-
-    If the user says:
-
-    "list"
-    "list them"
-    "show"
-    "show me"
-    "display"
-    "display them"
-    "show all items"
-    "show all inventory"
-    "list all items"
-    "list all inventory"
-
-    use:
-
-    "response_type": "list"
-
-    If the user does not explicitly request a list, preserve the existing response_type.
-
-    If there is no existing response_type, use:
-
-    "total"
-
-    ==================================================
-    FOLLOW-UP QUESTIONS
-    ==================================================
-
-    Preserve existing context when the user asks a follow-up question.
-
-    Example:
-
-    Current context:
-
-    item_name = BSBA Uniform Set
-    gender = ""
-    size = ""
-    availability = all
-
-    User:
-
-    male?
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "total",
-        "item_name": "BSBA Uniform Set",
-        "gender": "male",
-        "size": "",
-        "availability": "all"
-    }
-
-    Example:
-
-    Current context:
-
-    item_name = BSBA Uniform Set
-    gender = male
-    size = ""
-    availability = all
-
-    User:
-
-    Small
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "total",
-        "item_name": "BSBA Uniform Set",
-        "gender": "male",
-        "size": "Small",
-        "availability": "all"
-    }
-
-    Example:
-
-    Current context:
-
-    item_name = BSBA Uniform Set
-    gender = male
-    size = Small
-    availability = all
-
-    User:
-
-    only available ones
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "total",
-        "item_name": "BSBA Uniform Set",
-        "gender": "male",
-        "size": "Small",
-        "availability": "available"
-    }
-
-    Example:
-
-    Current context:
-
-    item_name = BSBA Uniform Set
-    gender = male
-    size = Small
-    availability = all
-
-    User:
-
-    only low stock ones
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "total",
-        "item_name": "BSBA Uniform Set",
-        "gender": "male",
-        "size": "Small",
-        "availability": "low_stock"
-    }
-
-    ==================================================
-    SPECIAL COMMANDS
-    ==================================================
-
-    If the user says:
-
-    eleazar
-
-    return exactly:
-
-    {
-        "type": "chat",
-        "response": "So cool!"
-    }
-
-    Greetings such as:
-
-    hello
-    hi
-    hey
-    good morning
-    good afternoon
-    good evening
-
-    return:
-
-    {
-        "type": "greeting"
-    }
-
-    If the user asks what the chatbot can do, return:
-
-    {
-        "type": "help"
-    }
-
-    For unrelated conversational questions, return:
-
-    {
-        "type": "general",
-        "response": "your natural response"
-    }
-
-    ==================================================
-    INVENTORY EXAMPLES
-    ==================================================
-
-    User:
-
-    BSBA Uniform Set
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "total",
-        "item_name": "BSBA Uniform Set",
-        "gender": "",
-        "size": "",
-        "availability": "all"
-    }
-
-    User:
-
-    How many BSBA Uniform Set?
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "total",
-        "item_name": "BSBA Uniform Set",
-        "gender": "",
-        "size": "",
-        "availability": "all"
-    }
-
-    User:
-
-    Male BSBA Uniform Set
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "total",
-        "item_name": "BSBA Uniform Set",
-        "gender": "male",
-        "size": "",
-        "availability": "all"
-    }
-
-    User:
-
-    Male Small BSBA Uniform Set
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "total",
-        "item_name": "BSBA Uniform Set",
-        "gender": "male",
-        "size": "Small",
-        "availability": "all"
-    }
-
-    User:
-
-    List male Small BSBA Uniform Set
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "list",
-        "item_name": "BSBA Uniform Set",
-        "gender": "male",
-        "size": "Small",
-        "availability": "all"
-    }
-
-    User:
-
-    List all available male stocks
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "list",
-        "item_name": "",
-        "gender": "male",
-        "size": "",
-        "availability": "available"
-    }
-
-    User:
-
-    List all low stock male items
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "list",
-        "item_name": "",
-        "gender": "male",
-        "size": "",
-        "availability": "low_stock"
-    }
-
-    User:
-
-    How many female stocks?
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "total",
-        "item_name": "",
-        "gender": "female",
-        "size": "",
-        "availability": "all"
-    }
-
-    User:
-
-    How many low stocks?
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "total",
-        "item_name": "",
-        "gender": "",
-        "size": "",
-        "availability": "low_stock"
-    }
-
-    User:
-
-    Show low stock BSBA Uniform Set
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "list",
-        "item_name": "BSBA Uniform Set",
-        "gender": "",
-        "size": "",
-        "availability": "low_stock"
-    }
-
-    User:
-
-    show all items
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "list",
-        "item_name": "",
-        "gender": "",
-        "size": "",
-        "availability": "all"
-    }
-
-    User:
-
-    show all inventory
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "list",
-        "item_name": "",
-        "gender": "",
-        "size": "",
-        "availability": "all"
-    }
-
-    User:
-
-    list all items
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "list",
-        "item_name": "",
-        "gender": "",
-        "size": "",
-        "availability": "all"
-    }
-
-    User:
-
-    how many items are there
-
-    Return:
-
-    {
-        "type": "inventory",
-        "response_type": "total",
-        "item_name": "",
-        "gender": "",
-        "size": "",
-        "availability": "all"
-    }
-
-    ==================================================
-    FINAL RULES
-    ==================================================
-
-    Return ONLY valid JSON.
-
-    The JSON MUST contain the "type" field.
-
-    NEVER omit "type".
-
-    For inventory requests, "type" MUST be:
-
-    "inventory"
-
-    For inventory requests, ALL of these fields are REQUIRED:
-
-    "type"
-    "response_type"
-    "item_name"
-    "gender"
-    "size"
-    "availability"
-
-    Do not return an inventory response without all six fields.
-
-    Do not return Markdown.
-
-    Do not return ```json.
-
-    Do not explain your answer.
-
-    Do not calculate inventory.
-
-    Do not invent values.
-
-    Do not guess missing filters.
-
-    When a value is not specified by the user and does not exist in the existing context, use an empty string.
-
-    ==================================================
-    CONVERSATION HISTORY
-    ==================================================
-    PROMPT;
-
-    foreach ($history as $item) {
-        $role = $item['role'] ?? '';
-        $text = $item['message'] ?? '';
-
-        $systemPrompt .= "\n";
-        $systemPrompt .= $role . ': ' . $text;
-    }
-
-    $messages = [
-        [
-            'role' => 'system',
-            'content' => $systemPrompt
-        ],
-        [
-            'role' => 'user',
-            'content' => $message
-        ]
-    ];
-
-    return askOllama($messages);
-}
-
-/*
-|--------------------------------------------------------------------------
-| Parse Ollama response
-|--------------------------------------------------------------------------
-*/
-function parseOllamaResponse($content) {
-    $content = trim($content);
-    if (strpos($content, '```') === 0) {
-        $content = preg_replace('/^```(?:json)?\s*/i','',$content);
-        $content = preg_replace('/\s*```$/','',$content);
-        $content = trim($content);
-    }
-
-    $data = json_decode($content, true);
-    if (is_array($data)) {
         return $data;
     }
 
-    return ['type' => 'general','response' => $content];
-}
+    private function filterInventory($inventory, $filters) {
+        $filtered = [];
 
-/*
-|--------------------------------------------------------------------------
-| Filter inventory
-|--------------------------------------------------------------------------
-*/
-function filterInventory($inventory, $filters) {
-    $filtered = [];
-    $itemName = strtolower(trim($filters['item_name'] ?? ''));
-    $gender = normalizeGender($filters['gender'] ?? '');
-    $size = normalizeSize($filters['size'] ?? '');
-    $availability = normalizeAvailability($filters['availability'] ?? 'all');
+        $itemName = strtolower(trim($filters['item_name'] ?? ''));
+        $gender = $this->normalizeGender($filters['gender'] ?? '');
+        $size = $this->normalizeSize($filters['size'] ?? '');
+        $availability = $this->normalizeAvailability($filters['availability'] ?? 'all');
 
-    foreach ($inventory as $row) {
-        $rowItemName = strtolower(trim($row['item_name'] ?? ''));
-        $sizeCode = trim($row['size_code'] ?? '');
-        $quantity = (int)($row['quantity'] ?? 0);
-
-        if ($itemName !== '') {
-            if (stripos($rowItemName, $itemName) === false) {
-                continue;
-            }
-        }
-
-        if ($gender === 'male') {
-            if (strpos($sizeCode, '(M)') !== 0) {
-                continue;
-            }
-        }
-
-        if ($gender === 'female') {
-            if (strpos($sizeCode, '(F)') !== 0) {
-                continue;
-            }
-        }
-
-        if ($size !== '') {
-            $actualSize = str_replace(['(M)','(F)'],'',$sizeCode);
-            $actualSize = normalizeSize($actualSize);
-            if ($actualSize !== $size) {
-                continue;
-            }
-        }
-
-        if ($availability === 'available') {
-            if ($quantity <= 0) {
-                continue;
-            }
-        }
-
-        if ($availability === 'low_stock') {
-            if ($quantity <= 0 || $quantity >= 50) {
-                continue;
-            }
-        }
-
-        if ($availability === 'out_of_stock') {
-            if ($quantity > 0) {
-                continue;
-            }
-        }
-
-        $filtered[] = $row;
-    }
-
-    return $filtered;
-}
-
-/*
-|--------------------------------------------------------------------------
-| Calculate inventory total
-|--------------------------------------------------------------------------
-*/
-function calculateInventoryTotal($inventory) {
-    $total = 0;
-    foreach ($inventory as $row) {
-        $total += (int)($row['quantity'] ?? 0);
-    }
-    return $total;
-}
-
-/*
-|--------------------------------------------------------------------------
-| Get gender label
-|--------------------------------------------------------------------------
-*/
-function getGenderLabel($sizeCode) {
-    if (strpos($sizeCode, '(M)') === 0) {
-        return 'Male';
-    }
-
-    if (strpos($sizeCode, '(F)') === 0) {
-        return 'Female';
-    }
-
-    return '';
-}
-
-/*
-|--------------------------------------------------------------------------
-| Get display size
-|--------------------------------------------------------------------------
-*/
-
-function getDisplaySize($sizeCode) {
-    return str_replace(['(M)','(F)'], '', $sizeCode);
-}
-
-/*
-|--------------------------------------------------------------------------
-| Build total response
-|--------------------------------------------------------------------------
-*/
-function buildInventoryTotal($inventory, $filters) {
-    $total = calculateInventoryTotal($inventory);
-    $itemName = trim($filters['item_name'] ?? '');
-    $gender = normalizeGender($filters['gender'] ?? '');
-    $size = normalizeSize($filters['size'] ?? '');
-    $availability = normalizeAvailability($filters['availability'] ?? 'all');
-
-    $description = $itemName !== '' ? $itemName : 'inventory'; 
-    if ($gender !== '') {
-        $description = ucfirst($gender) . ' ' . $description;
-    }
-
-    if ($size !== '') {
-        $description = ucfirst($size) . ' ' . $description;
-    }
-
-    if ($availability === 'available') {
-        $description .= ' in stock';
-    } elseif ($availability === 'low_stock') {
-        $description .= ' low stock';
-    } elseif ($availability === 'out_of_stock') {
-        $description .= ' out of stock';
-    } else {
-        $description .= ' items';
-    }
-
-    if ($total == 1) {
-        $description = rtrim($description, 's');
-    }
-
-    return 'There are ' . number_format($total) . ' ' . $description . '.'; 
-}
-
-/*
-|--------------------------------------------------------------------------
-| Build inventory list
-|--------------------------------------------------------------------------
-*/
-
-function buildInventoryList($inventory, $filters) {
-    if (empty($inventory)) {
-        return 'No matching inventory records were found.';
-    }
-
-    $groups = [];
-
-    foreach ($inventory as $row) {
-        $itemName = trim($row['item_name'] ?? '');
-
-        if ($itemName === '') {
-            $itemName = 'Unnamed Item';
-        }
-
-        $groups[$itemName][] = $row;
-    }
-
-    $response = '';
-    foreach ($groups as $itemName => $rows) {
-        $response .= '• ' . $itemName . "\n";
-
-        $itemTotal = 0;
-
-        foreach ($rows as $row) {
+        foreach ($inventory as $row) {
+            $rowItemName = strtolower(trim($row['item_name'] ?? ''));
             $sizeCode = trim($row['size_code'] ?? '');
             $quantity = (int)($row['quantity'] ?? 0);
 
-            $displaySize = getDisplaySize($sizeCode);
-            $gender = getGenderLabel($sizeCode);
-
-            if ($displaySize === '') {
-                $displaySize = 'Stock';
+            if ($itemName !== '') {
+                if (stripos($rowItemName, $itemName) === false) {
+                    continue;
+                }
             }
 
-            $label = '';
-            if ($gender !== '') {
-                $label .= $gender . ' ';
+            if ($gender === 'male') {
+                if (strpos($sizeCode, '(M)') !== 0) {
+                    continue;
+                }
             }
 
-            $label .= $displaySize;
-            $response .= '  - ' . $label . ': ' . number_format($quantity) . "\n"; 
-            $itemTotal += $quantity;
+            if ($gender === 'female') {
+                if (strpos($sizeCode, '(F)') !== 0) {
+                    continue;
+                }
+            }
+
+            if ($size !== '') {
+                $actualSize = str_replace(['(M)', '(F)'], '', $sizeCode);
+                $actualSize = $this->normalizeSize($actualSize);
+
+                if ($actualSize !== $size) {
+                    continue;
+                }
+            }
+
+            if ($availability === 'available') {
+                if ($quantity <= 0) {
+                    continue;
+                }
+            }
+
+            if ($availability === 'low_stock') {
+                if ($quantity <= 0 || $quantity >= 50) {
+                    continue;
+                }
+            }
+
+            if ($availability === 'out_of_stock') {
+                if ($quantity > 0) {
+                    continue;
+                }
+            }
+
+            $filtered[] = $row;
         }
-        $response .= '  Total: ' . number_format($itemTotal) . "\n\n";
+
+        return $filtered;
     }
 
-    $overallTotal = calculateInventoryTotal($inventory);
-    $gender = normalizeGender($filters['gender'] ?? '');
+    private function calculateInventoryTotal($inventory) {
+        $total = 0;
 
-    if ($gender !== '') {
-        $response .= 'Total ' . ucfirst($gender) . ' Stock: ' . number_format($overallTotal);
-    } else {
-        $response .= 'Total Stock: ' . number_format($overallTotal); 
-    }
-
-    return trim($response);
-}
-
-/*
-|--------------------------------------------------------------------------
-| Greeting
-|--------------------------------------------------------------------------
-*/
-
-function getGreetingResponse() {
-    return 'Hello! How can I help you with the inventory?';
-}
-
-/*
-|--------------------------------------------------------------------------
-| Help
-|--------------------------------------------------------------------------
-*/
-function getHelpResponse() {
-    return "I can help you check inventory, quantities, sizes, gender, and availability.\n\nExamples:\n• How many BSBA Uniform Set?\n• How many male BSBA Uniform Set?\n• Show male Small stocks\n• List all available male stocks\n• Show all items\n• How many female stocks?\n• Only available ones\n• Show low stock items";
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| Save assistant response
-|--------------------------------------------------------------------------
-*/
-function finishChatResponse($reply, $context = null) {
-    saveConversation('assistant',$reply);
-    return ['status' => true,'reply' => $reply,'context' => $context ?? getInventoryContext()];
-}
-
-/*
-|--------------------------------------------------------------------------
-| Main chatbot
-|--------------------------------------------------------------------------
-*/
-function processChat($conn, $message) {
-    $message = trim($message);
-    if ($message === '') {
-        return ['status' => false,'reply' => 'Please enter a message.'];
-    }
-
-    $context = getInventoryContext();
-    $history = getConversationHistory();
-
-    saveConversation('user',$message);
-
-    $ollama = analyzeInventoryRequest($message,$context,$history);
-
-    if (!$ollama['success']) {
-        return ['status' => false,'reply' => 'Unable to connect to the chatbot.','error' => $ollama['error']];
-    }
-
-    $ai = parseOllamaResponse($ollama['content']);
-    $type = strtolower(trim($ai['type'] ?? 'general'));
-
-    /*
-    |--------------------------------------------------------------------------
-    | Greeting
-    |--------------------------------------------------------------------------
-    */
-    if ($type === 'greeting') {
-        return finishChatResponse(getGreetingResponse(),$context);
-    }
-
-    /*
-    |--------------------------------------------------------------------------
-    | Help
-    |--------------------------------------------------------------------------
-    */
-    if ($type === 'help') {
-        return finishChatResponse(getHelpResponse(),$context);
-    }
-
-    /*
-    |--------------------------------------------------------------------------
-    | General
-    |--------------------------------------------------------------------------
-    */
-    if ($type === 'general') {
-        $reply = trim($ai['response'] ?? '');
-        if ($reply === '') {
-            $reply = 'How can I help you?';
+        foreach ($inventory as $row) {
+            $total += (int)($row['quantity'] ?? 0);
         }
-        return finishChatResponse($reply,$context);
+
+        return $total;
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | Chat
-    |--------------------------------------------------------------------------
-    */
-    if ($type === 'chat') {
-        $reply = trim($ai['response'] ?? '');
-        if ($reply === '') {
-            $reply = 'How can I help you?';
+    private function getGenderLabel($sizeCode) {
+        if (strpos($sizeCode, '(M)') === 0) {
+            return 'Male';
         }
-        return finishChatResponse($reply,$context);
+
+        if (strpos($sizeCode, '(F)') === 0) {
+            return 'Female';
+        }
+
+        return '';
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | Summary
-    |--------------------------------------------------------------------------
-    */
-    if ($type === 'summary') {
-        $inventory = getInventory($conn);
-        $total = calculateInventoryTotal($inventory);
-        $itemCount = count($inventory);
+    private function getDisplaySize($sizeCode) {
+        $sizeCode = trim($sizeCode);
+        $sizeCode = str_replace(['(M)', '(F)'], '', $sizeCode);
 
-        $reply =
-            'There are ' .
-            number_format($itemCount) .
-            ' inventory records with a total quantity of ' .
-            number_format($total) .
-            '.';
-
-        return finishChatResponse($reply,$context);
+        return trim($sizeCode);
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | Inventory
-    |--------------------------------------------------------------------------
-    */
-    if ($type === 'inventory') {
-        $filters = [
-            'item_name' => trim($ai['item_name'] ?? ''),
-            'gender' => normalizeGender($ai['gender'] ?? ''),
-            'size' => normalizeSize($ai['size'] ?? ''),
-            'availability' => normalizeAvailability($ai['availability'] ?? 'all'),
-            'response_type' => normalizeResponseType($ai['response_type'] ?? 'total')
+    private function buildInventoryTotal($inventory, $filters) {
+        $total = $this->calculateInventoryTotal($inventory);
+        $itemName = trim($filters['item_name'] ?? '');
+        $gender = $this->normalizeGender($filters['gender'] ?? '');
+        $size = $this->normalizeSize($filters['size'] ?? '');
+        $availability = $this->normalizeAvailability($filters['availability'] ?? 'all');
+
+        $description = $itemName !== '' ? $itemName : 'inventory';
+
+        if ($gender !== '') {
+            $description = ucfirst($gender) . ' ' . $description;
+        }
+
+        if ($size !== '') {
+            $description = ucfirst($size) . ' ' . $description;
+        }
+
+        if ($availability === 'available') {
+            $description .= ' in stock';
+        } else if ($availability === 'low_stock') {
+            $description .= ' low stock';
+        } else if ($availability === 'out_of_stock') {
+            $description .= ' out of stock';
+        } else {
+            $description .= ' items';
+        }
+
+        if ($total == 1) {
+            $description = rtrim($description, 's');
+        }
+
+        return 'There are ' . number_format($total) . ' ' . $description . '.';
+    }
+
+    private function buildInventoryList($inventory, $filters) {
+        if (empty($inventory)) {
+            return 'No matching inventory records were found.';
+        }
+
+        $groups = [];
+
+        foreach ($inventory as $row) {
+            $itemName = trim($row['item_name'] ?? '');
+
+            if ($itemName === '') {
+                $itemName = 'Unnamed Item';
+            }
+
+            $groups[$itemName][] = $row;
+        }
+
+        $response = '';
+
+        foreach ($groups as $itemName => $rows) {
+            $response .= '• ' . $itemName . "\n\n";
+
+            $femaleRows = [];
+            $maleRows = [];
+            $otherRows = [];
+
+            foreach ($rows as $row) {
+                $sizeCode = trim($row['size_code'] ?? '');
+                $gender = $this->getGenderLabel($sizeCode);
+
+                if ($gender === 'Female') {
+                    $femaleRows[] = $row;
+                } else if ($gender === 'Male') {
+                    $maleRows[] = $row;
+                } else {
+                    $otherRows[] = $row;
+                }
+            }
+
+            $femaleTotal = 0;
+
+            if (!empty($femaleRows)) {
+                $response .= "Female\n";
+
+                foreach ($femaleRows as $row) {
+                    $sizeCode = trim($row['size_code'] ?? '');
+                    $quantity = (int)($row['quantity'] ?? 0);
+                    $displaySize = $this->getDisplaySize($sizeCode);
+
+                    if ($displaySize === '') {
+                        $displaySize = 'Stock';
+                    }
+
+                    $response .= '- ' . $displaySize . ': ' . number_format($quantity) . "\n";
+                    $femaleTotal += $quantity;
+                }
+
+                $response .= 'Female Total: ' . number_format($femaleTotal) . "\n\n";
+            }
+
+            $maleTotal = 0;
+
+            if (!empty($maleRows)) {
+                $response .= "Male\n";
+
+                foreach ($maleRows as $row) {
+                    $sizeCode = trim($row['size_code'] ?? '');
+                    $quantity = (int)($row['quantity'] ?? 0);
+                    $displaySize = $this->getDisplaySize($sizeCode);
+
+                    if ($displaySize === '') {
+                        $displaySize = 'Stock';
+                    }
+
+                    $response .= '- ' . $displaySize . ': ' . number_format($quantity) . "\n";
+                    $maleTotal += $quantity;
+                }
+
+                $response .= 'Male Total: ' . number_format($maleTotal) . "\n\n";
+            }
+
+            $otherTotal = 0;
+
+            foreach ($otherRows as $row) {
+                $quantity = (int)($row['quantity'] ?? 0);
+                $displaySize = $this->getDisplaySize($row['size_code'] ?? '');
+
+                if ($displaySize === '') {
+                    $displaySize = 'Stock';
+                }
+
+                $response .= '- ' . $displaySize . ': ' . number_format($quantity) . "\n";
+                $otherTotal += $quantity;
+            }
+
+            $itemTotal = $femaleTotal + $maleTotal + $otherTotal;
+
+            if ($otherTotal > 0) {
+                $response .= 'Other Total: ' . number_format($otherTotal) . "\n";
+            }
+
+            if ($filters['availability'] === 'low_stock') {
+                $response .= 'Total Low Stock: ' . number_format($itemTotal) . "\n\n";
+            } else if ($filters['availability'] === 'available') {
+                $response .= 'Total Available: ' . number_format($itemTotal) . "\n\n";
+            } else if ($filters['availability'] === 'out_of_stock') {
+                $response .= 'Total Out of Stock: ' . number_format($itemTotal) . "\n\n";
+            } else {
+                $response .= 'Total: ' . number_format($itemTotal) . "\n\n";
+            }
+        }
+
+        $overallTotal = $this->calculateInventoryTotal($inventory);
+        $gender = $this->normalizeGender($filters['gender'] ?? '');
+
+        if ($filters['availability'] === 'low_stock') {
+            $response .= 'Total Low Stock: ' . number_format($overallTotal);
+        } else if ($filters['availability'] === 'available') {
+            $response .= 'Total Available: ' . number_format($overallTotal);
+        } else if ($filters['availability'] === 'out_of_stock') {
+            $response .= 'Total Out of Stock: ' . number_format($overallTotal);
+        } else if ($gender === 'male') {
+            $response .= 'Total Male Stock: ' . number_format($overallTotal);
+        } else if ($gender === 'female') {
+            $response .= 'Total Female Stock: ' . number_format($overallTotal);
+        } else {
+            $response .= 'Total Stock: ' . number_format($overallTotal);
+        }
+
+        return trim($response);
+    }
+
+    private function getGreetingResponse() {
+        return 'Hello! How can I help you with the inventory?';
+    }
+
+    private function getHelpResponse() {
+        return 'You can ask me about stock quantities, available items, low stocks, out-of-stock items, sizes, or specific inventory items.';
+    }
+
+    private function finishChatResponse($reply, $context = null) {
+        $reply = trim($reply);
+
+        $this->saveConversation('assistant', $reply);
+
+        if ($context !== null) {
+            $this->saveInventoryContext($context);
+        }
+
+        return [
+            'status' => true,
+            'reply' => $reply
         ];
-
-        saveInventoryContext($filters);
-
-        $inventory = getInventory($conn);
-
-        $filteredInventory = filterInventory(
-            $inventory,
-            $filters
-        );
-
-        $reply = $filters['response_type'] === 'list' ? buildInventoryList($filteredInventory,$filters) : buildInventoryTotal($filteredInventory,$filters);
-
-        return finishChatResponse($reply,$filters);
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | Fallback
-    |--------------------------------------------------------------------------
-    */
-    return finishChatResponse(
-        'How can I help you with the inventory?',
-        $context
-    );
+    public function processChat($message) {
+        $message = trim($message);
+
+        if ($message === '') {
+            return [
+                'status' => false,
+                'reply' => 'Please enter a message.'
+            ];
+        }
+
+        $context = $this->getInventoryContext();
+        $history = $this->getConversationHistory();
+
+        $this->saveConversation('user', $message);
+
+        $ollama = $this->analyzeInventoryRequest($message, $context, $history);
+
+        if (!$ollama['success']) {
+            return [
+                'status' => false,
+                'reply' => 'Unable to connect to the chatbot.',
+                'error' => $ollama['error']
+            ];
+        }
+
+        $ai = $this->parseOllamaResponse($ollama['content']);
+        $type = strtolower(trim($ai['type'] ?? 'general'));
+
+        if ($type === 'greeting') {
+            return $this->finishChatResponse($this->getGreetingResponse(), $context);
+        }
+
+        if ($type === 'help') {
+            return $this->finishChatResponse($this->getHelpResponse(), $context);
+        }
+
+        if ($type === 'general') {
+            $reply = trim($ai['response'] ?? '');
+
+            if ($reply === '') {
+                $reply = 'How can I help you?';
+            }
+
+            return $this->finishChatResponse($reply, $context);
+        }
+
+        if ($type === 'chat') {
+            $reply = trim($ai['response'] ?? '');
+
+            if ($reply === '') {
+                $reply = 'How can I help you?';
+            }
+
+            return $this->finishChatResponse($reply, $context);
+        }
+
+        if ($type === 'inventory') {
+            $filters = [
+                'item_name' => trim($ai['item_name'] ?? ''),
+                'gender' => $this->normalizeGender($ai['gender'] ?? ''),
+                'size' => $this->normalizeSize($ai['size'] ?? ''),
+                'availability' => $this->normalizeAvailability($ai['availability'] ?? 'all'),
+                'response_type' => $this->normalizeResponseType($ai['response_type'] ?? 'total')
+            ];
+
+            $this->saveInventoryContext($filters);
+
+            $inventory = $this->inventory->getInventory();
+            $filteredInventory = $this->filterInventory($inventory, $filters);
+
+            if ($filters['response_type'] === 'list') {
+                $reply = $this->buildInventoryList($filteredInventory, $filters);
+            } else {
+                $reply = $this->buildInventoryTotal($filteredInventory, $filters);
+            }
+
+            $naturalResponse = $this->generateNaturalResponse($message, $filters, $reply);
+
+            return $this->finishChatResponse($naturalResponse, $filters);
+        }
+
+        return $this->finishChatResponse('How can I help you with the inventory?', $context);
+    }
+
+    public function newChat() {
+        $_SESSION['conversation'] = [];
+        $_SESSION['inventory_context'] = $this->getDefaultInventoryContext();
+
+        return [
+            'status' => true,
+            'reply' => 'New chat started.'
+        ];
+    }
 }
 
-/*
-|--------------------------------------------------------------------------
-| New chat
-|--------------------------------------------------------------------------
-*/
-if (isset($_GET['action']) && $_GET['action'] === 'new_chat') {
-    $_SESSION['conversation'] = [];
-    $_SESSION['inventory_context'] = getDefaultInventoryContext();
-    echo json_encode(['status' => true]);
+$chatbot = new InventoryChatbot();
+
+if (isset($_GET['action']) && $_GET['action'] === 'get_history') {
+    echo json_encode([
+        'status' => true,
+        'history' => $chatbot->getConversationHistory()
+    ]);
     exit;
 }
 
-/*
-|--------------------------------------------------------------------------
-| Chat request
-|--------------------------------------------------------------------------
-*/
+if (isset($_GET['action']) && $_GET['action'] === 'new_chat') {
+    echo json_encode($chatbot->newChat());
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $message = $_POST['message'] ?? '';
-    echo json_encode(processChat($conn,$message));
+    echo json_encode($chatbot->processChat($message));
     exit;
 }
 
-/*
-|--------------------------------------------------------------------------
-| Invalid request
-|--------------------------------------------------------------------------
-*/
-echo json_encode(['status' => false,'reply' => 'Invalid request.']);
+echo json_encode([
+    'status' => false,
+    'reply' => 'Invalid request.'
+]);
