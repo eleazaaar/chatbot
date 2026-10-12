@@ -2,15 +2,18 @@
 session_start();
 require_once 'database.php';
 require_once 'inventory.php';
+require_once 'extras.php';
+require_once 'config.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
 class InventoryChatbot {
-    private $conn, $inventory;
+    private $conn, $inventory, $extras;
     public function __construct() {
         date_default_timezone_set('Asia/Manila');
         $this->conn = Database::connection();
         $this->inventory = new Inventory();
+        $this->extras = new Extras();
 
         if (!isset($_SESSION['chat_session_id'])) {
             $_SESSION['chat_session_id'] = session_id();
@@ -43,15 +46,16 @@ class InventoryChatbot {
         $_SESSION['inventory_context'] = $context;
     }
 
-    private function saveConversation($role, $message) {
+    private function saveConversation($role, $message, $pdfUrl = '') {
         if (!isset($_SESSION['conversation'])) {
             $_SESSION['conversation'] = [];
         }
 
-        $_SESSION['conversation'][] = [
-            'role' => $role,
-            'message' => $message
-        ];
+        $entry = ['role' => $role, 'message' => $message];
+        if ($pdfUrl !== '') {
+            $entry['pdf_url'] = $pdfUrl;
+        }
+        $_SESSION['conversation'][] = $entry;
 
         if (count($_SESSION['conversation']) > 10) {
             array_shift($_SESSION['conversation']);
@@ -63,8 +67,8 @@ class InventoryChatbot {
     }
 
     private function askOllama($messages) {
-        $apiKey = '141a9f1faf5f46b99a2d716ccbe6c6a6.TX1semH-ECfPQ4rkjYgb1mrf';
-        $url = 'https://ollama.com/api/chat';
+        $apiKey = OLLAMA_API_KEY;
+        $url = OLLAMA_API_URL;
 
         $data = [
             'model' => 'gpt-oss:20b-cloud',
@@ -253,6 +257,7 @@ class InventoryChatbot {
 
         Allowed type values:
         inventory
+        report
         greeting
         help
         general
@@ -343,9 +348,20 @@ class InventoryChatbot {
 
         18. Do not invent database results.
 
+        19. If the user asks to generate, create, download, or open a PDF report, return type = "report" and these fields:
+        {"type":"report","report_name":"inventory","from":"YYYY-MM-DD","to":"YYYY-MM-DD","campus":"","course":"","item_specification":""}
+        Allowed report_name values are inventory, audit_trail, overall, and sales.
+        Choose audit_trail for audit trail/history reports, overall for overall reports, sales for sales reports, and inventory for inventory reports.
+        Extract the campus description when the user names a campus. Extract the campus ID only when the user explicitly specifies a campus number. Use an empty campus string when the user asks for all campuses or does not specify a campus. For overall reports, extract the course description and item specification when specified.
+        For overall reports, extract the course and item specification when the user specifies them; otherwise use empty strings.
+        Use today's date for both from and to if no date range is specified. Resolve relative dates such as "last month" using today's date supplied below. Dates must be ISO format YYYY-MM-DD. Do not return a report URL; PHP creates it.
+
+        Today's date is supplied by PHP.
+
         Previous inventory context:
         PROMPT;
 
+        $systemPrompt .= "\nToday's date: " . date('Y-m-d') . "\n";
         $systemPrompt .= "\n" . json_encode($context);
 
         $systemPrompt .= "\n\nPrevious conversation:\n";
@@ -711,19 +727,20 @@ class InventoryChatbot {
         return 'You can ask me about stock quantities, available items, low stocks, out-of-stock items, sizes, or specific inventory items.';
     }
 
-    private function finishChatResponse($reply, $context = null) {
+    private function finishChatResponse($reply, $context = null, $pdfUrl = '') {
         $reply = trim($reply);
 
-        $this->saveConversation('assistant', $reply);
+        $this->saveConversation('assistant', $reply, $pdfUrl);
 
         if ($context !== null) {
             $this->saveInventoryContext($context);
         }
 
-        return [
-            'status' => true,
-            'reply' => $reply
-        ];
+        $response = ['status' => true, 'reply' => $reply];
+        if ($pdfUrl !== '') {
+            $response['pdf_url'] = $pdfUrl;
+        }
+        return $response;
     }
 
     public function processChat($message) {
@@ -753,6 +770,128 @@ class InventoryChatbot {
 
         $ai = $this->parseOllamaResponse($ollama['content']);
         $type = strtolower(trim($ai['type'] ?? 'general'));
+
+        if ($type === 'report') {
+            $today = date('Y-m-d');
+            $from = trim((string)($ai['from'] ?? $today));
+            $to = trim((string)($ai['to'] ?? $today));
+            $campus = trim((string)($ai['campus'] ?? ''));
+            $course = trim((string)($ai['course'] ?? ''));
+            $itemSpecification = trim((string)($ai['item_specification'] ?? ''));
+            $reportName = strtolower(trim((string)($ai['report_name'] ?? '')));
+
+            // Prefer an explicit report name in the user's message over the model's guess.
+            $requestText = strtolower($message);
+            if (strpos($requestText, 'audit trail') !== false || strpos($requestText, 'audit history') !== false) {
+                $reportName = 'audit_trail';
+            } elseif (strpos($requestText, 'overall') !== false) {
+                $reportName = 'overall';
+            } elseif (strpos($requestText, 'sales report') !== false || strpos($requestText, 'sales pdf') !== false || strpos($requestText, 'sales') !== false || strpos($requestText, 'sale report') !== false) {
+                $reportName = 'sales';
+            } elseif (!in_array($reportName, ['inventory', 'audit_trail', 'overall', 'sales'], true)) {
+                $reportName = 'inventory';
+            }
+
+            $validDate = function ($date) {
+                $parsed = DateTimeImmutable::createFromFormat('!Y-m-d', $date);
+                return $parsed && $parsed->format('Y-m-d') === $date;
+            };
+
+            if (!$validDate($from) || !$validDate($to) || $from > $to) {
+                return $this->finishChatResponse('Please specify a valid report date range, such as January 1 to March 31, 2026.', $context);
+            }
+
+            
+            if (strtolower($campus) === 'all') {
+                $campus = '';
+            }
+
+            $campusDescription = $campus;
+
+            if ($campus !== '') {
+                $campuses = $this->extras->getCampusID();
+                $matchedCampus = null;
+
+                foreach ($campuses as $campusRow) {
+                    if (
+                        (ctype_digit($campus) && (string)$campusRow['id'] === $campus) ||
+                        (!ctype_digit($campus) && strcasecmp(trim($campusRow['description']), $campus) === 0)
+                    ) {
+                        $matchedCampus = $campusRow;
+                        break;
+                    }
+                }
+
+                if (!$matchedCampus && !ctype_digit($campus)) {
+                    $matches = $this->extras->getCampusID($campus);
+
+                    if (count($matches) === 1) {
+                        $matchedCampus = $matches[0];
+                    }
+                }
+
+                if (!$matchedCampus) {
+                    return $this->finishChatResponse('I could not identify that campus. Please use its full campus description or campus ID, or say all campuses.', $context);
+                }
+
+                $campusDescription = $matchedCampus['description'];
+                $campus = (string)$matchedCampus['id'];
+            }
+
+            $courseDescription = $course;
+
+            if ($reportName === 'overall' && $course !== '') {
+                $courses = $this->extras->getCourseID();
+                $matchedCourse = null;
+
+                foreach ($courses as $courseRow) {
+                    if (
+                        (ctype_digit($course) && (string)$courseRow['id'] === $course) ||
+                        (!ctype_digit($course) && strcasecmp(trim($courseRow['description']), $course) === 0)
+                    ) {
+                        $matchedCourse = $courseRow;
+                        break;
+                    }
+                }
+
+                if (!$matchedCourse && !ctype_digit($course)) {
+                    $matches = $this->extras->getCourseID($course);
+
+                    if (count($matches) === 1) {
+                        $matchedCourse = $matches[0];
+                    }
+                }
+
+                if (!$matchedCourse) {
+                    return $this->finishChatResponse('I could not identify that course. Please use its full course description or course ID.', $context);
+                }
+
+                $courseDescription = $matchedCourse['description'];
+                $course = (string)$matchedCourse['id'];
+            }
+
+            $reportFiles = [
+                'inventory' => 'inventory/inventory.php',
+                'audit_trail' => 'audit_trail/audit_trail.php',
+                'overall' => 'overall/overall.php',
+                'sales' => 'sales/sales.php'
+            ];
+
+            $params = ['file' => $reportFiles[$reportName], 'campus' => $campus, 'from' => $from, 'to' => $to];
+            if ($reportName === 'overall') {
+                $params['course'] = $course;
+                $params['item_specification'] = $itemSpecification;
+            }
+
+            $pdfUrl = INVENTORY_URL . '/admin/reports/xPDFLoader.php?' . http_build_query($params);
+            $reportLabels = ['inventory' => 'inventory', 'audit_trail' => 'audit trail', 'overall' => 'overall', 'sales' => 'sales'];
+            $reply = 'Your ' . $reportLabels[$reportName] . ' PDF report is ready to open. Date range: ' . $from . ' to ' . $to;
+            $reply .= ($campus !== '' ? '. Campus: ' . $campusDescription : '. All campuses');
+            if ($reportName === 'overall' && $course !== '') $reply .= '. Course: ' . $course;
+            if ($reportName === 'overall' && $itemSpecification !== '') $reply .= '. Item specification: ' . $itemSpecification;
+            $reply .= '.';
+            return $this->finishChatResponse($reply, $context, $pdfUrl);
+        }
 
         if ($type === 'greeting') {
             return $this->finishChatResponse($this->getGreetingResponse(), $context);
