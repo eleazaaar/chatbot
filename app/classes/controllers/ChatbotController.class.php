@@ -1,19 +1,26 @@
 <?php
-session_start();
-require_once 'database.php';
-require_once 'inventory.php';
-require_once 'extras.php';
-require_once 'config.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
-class InventoryChatbot {
-    private $conn, $inventory, $extras;
+if (!function_exists('fileExists')) {
+    function fileExists($file="") {
+        for ($i=0; $i<10 && !file_exists($file); $i++) {
+            $file = "../" . $file;
+        } return $file;
+    }
+}
+
+include_once fileExists('app/classes/models/ChatbotModel.php');
+
+class ChatbotController extends ChatbotModel {
+    private $OLLAMA_API_KEY, $OLLAMA_API_URL, $INVENTORY_URL;
+
     public function __construct() {
-        date_default_timezone_set('Asia/Manila');
-        $this->conn = Database::connection();
-        $this->inventory = new Inventory();
-        $this->extras = new Extras();
+        parent::__construct();
+
+        $this->OLLAMA_API_KEY = getenv('OLLAMA_API_KEY');
+        $this->OLLAMA_API_URL = getenv('OLLAMA_API_URL');
+        $this->INVENTORY_URL = getenv('INVENTORY_URL');
 
         if (!isset($_SESSION['chat_session_id'])) {
             $_SESSION['chat_session_id'] = session_id();
@@ -24,51 +31,9 @@ class InventoryChatbot {
         }
     }
 
-    private function getDefaultInventoryContext() {
-        return [
-            'item_name' => '',
-            'gender' => '',
-            'size' => '',
-            'availability' => 'all',
-            'response_type' => 'total'
-        ];
-    }
-
-    private function getInventoryContext() {
-        if (!isset($_SESSION['inventory_context'])) {
-            $_SESSION['inventory_context'] = $this->getDefaultInventoryContext();
-        }
-
-        return $_SESSION['inventory_context'];
-    }
-
-    private function saveInventoryContext($context) {
-        $_SESSION['inventory_context'] = $context;
-    }
-
-    private function saveConversation($role, $message, $pdfUrl = '') {
-        if (!isset($_SESSION['conversation'])) {
-            $_SESSION['conversation'] = [];
-        }
-
-        $entry = ['role' => $role, 'message' => $message];
-        if ($pdfUrl !== '') {
-            $entry['pdf_url'] = $pdfUrl;
-        }
-        $_SESSION['conversation'][] = $entry;
-
-        if (count($_SESSION['conversation']) > 10) {
-            array_shift($_SESSION['conversation']);
-        }
-    }
-
-    public function getConversationHistory() {
-        return $_SESSION['conversation'] ?? [];
-    }
-
     private function askOllama($messages) {
-        $apiKey = OLLAMA_API_KEY;
-        $url = OLLAMA_API_URL;
+        $apiKey = $this->OLLAMA_API_KEY;
+        $url = $this->OLLAMA_API_URL;
 
         $data = [
             'model' => 'gpt-oss:20b-cloud',
@@ -83,15 +48,10 @@ class InventoryChatbot {
         $jsonData = json_encode($data);
 
         if ($jsonData === false) {
-            return [
-                'success' => false,
-                'content' => '',
-                'error' => 'Unable to encode Ollama request.'
-            ];
+            return ['success' => false,'content' => '','error' => 'Unable to encode Ollama request.'];
         }
 
         $ch = curl_init($url);
-
         curl_setopt_array($ch, [
             CURLOPT_POST => true,
             CURLOPT_POSTFIELDS => $jsonData,
@@ -109,126 +69,76 @@ class InventoryChatbot {
         if ($response === false) {
             $error = curl_error($ch);
             curl_close($ch);
-
-            return [
-                'success' => false,
-                'content' => '',
-                'error' => $error
-            ];
+            return ['success' => false,'content' => '','error' => $error];
         }
 
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
-
         if ($httpCode < 200 || $httpCode >= 300) {
-            return [
-                'success' => false,
-                'content' => '',
-                'error' => 'Ollama HTTP error: ' . $httpCode
-            ];
+            return ['success' => false,'content' => '','error' => 'Ollama HTTP error: ' . $httpCode];
         }
 
         $result = json_decode($response, true);
-
         if (!is_array($result)) {
-            return [
-                'success' => false,
-                'content' => '',
-                'error' => 'Invalid JSON response from Ollama.'
-            ];
+            return ['success' => false,'content' => '','error' => 'Invalid JSON response from Ollama.'];
         }
 
         if (!isset($result['message']) || !isset($result['message']['content'])) {
-            return [
-                'success' => false,
-                'content' => '',
-                'error' => 'Ollama response does not contain message content.'
-            ];
+            return ['success' => false,'content' => '','error' => 'Ollama response does not contain message content.'];
         }
 
-        return [
-            'success' => true,
-            'content' => $result['message']['content'],
-            'error' => ''
-        ];
+        return ['success' => true,'content' => $result['message']['content'],'error' => ''];
     }
 
     private function normalizeSize($size) {
         $size = strtolower(trim($size));
+        if ($size === '') return '';
 
-        if ($size === '') {
-            return '';
-        }
-
-        switch ($size) {
-            case 'xs':
-            case 'x-small':
-            case 'extra small':
-            case 'extra-small':
-                return 'xsmall';
-
-            case 's':
-            case 'small':
-                return 'small';
-
-            case 'm':
-            case 'medium':
-                return 'medium';
-
-            case 'l':
-            case 'large':
-                return 'large';
-
-            case 'xl':
-            case 'x-large':
-            case 'extra large':
-            case 'extra-large':
-                return 'xlarge';
-
-            default:
-                return $size;
-        }
+        if (in_array($size, ['xs', 'x-smal', 'extra small', 'extra-small'])) {
+            return 'xsmall';
+        } else if (in_array($size, ['s', 'small'])) {
+            return 'small';
+        } else if (in_array($size, ['m', 'medium'])) {
+            return 'medium';
+        } else if (in_array($size, ['l', 'large'])) {
+            return 'large';
+        } else if (in_array($size, ['xl', 'x-large', 'extra large', 'extra-large'])) {
+            return 'xlarge';
+        } 
+        return $size;
     }
 
     private function normalizeGender($gender) {
         $gender = strtolower(trim($gender));
+        if ($gender === '') return '';
 
-        if ($gender === 'm' || $gender === 'male' || $gender === 'men' || $gender === 'man') {
+        if (in_array($gender, ['m', 'male', 'men', 'man', 'boy', 'boys'])) {
             return 'male';
-        }
-
-        if ($gender === 'f' || $gender === 'female' || $gender === 'women' || $gender === 'woman') {
+        } else if (in_array($gender, ['f', 'female', 'women', 'woman', 'girl', 'girls'])) {
             return 'female';
-        }
-
-        return '';
+        } 
+        return $gender;
     }
 
     private function normalizeAvailability($availability) {
         $availability = strtolower(trim($availability));
 
-        if ($availability === 'available' || $availability === 'in stock' || $availability === 'instock') {
+        if (in_array($availability, ['available', 'in stock', 'instock'])) {
             return 'available';
-        }
-
-        if ($availability === 'low_stock' || $availability === 'low stock' || $availability === 'low stocks' || $availability === 'low inventory' || $availability === 'below 50' || $availability === 'less than 50') {
+        } else if (in_array($availability, ['low stock', 'low stock', 'low stocks', 'low inventory', 'below 50', 'less than 50'])) {
             return 'low_stock';
-        }
-
-        if ($availability === 'out_of_stock' || $availability === 'out of stock' || $availability === 'outofstock') {
+        } else if (in_array($availability, ['out of stock', 'out of stock', 'outofstock'])) {
             return 'out_of_stock';
         }
-
         return 'all';
     }
 
     private function normalizeResponseType($responseType) {
         $responseType = strtolower(trim($responseType));
 
-        if ($responseType === 'list' || $responseType === 'show' || $responseType === 'display') {
+        if (in_array($responseType, ['list', 'show', 'display'])) {
             return 'list';
         }
-
         return 'total';
     }
 
@@ -452,11 +362,7 @@ class InventoryChatbot {
 
     private function parseOllamaResponse($content) {
         $data = json_decode($content, true);
-
-        if (!is_array($data)) {
-            return [];
-        }
-
+        if (!is_array($data)) return [];
         return $data;
     }
 
@@ -526,11 +432,9 @@ class InventoryChatbot {
 
     private function calculateInventoryTotal($inventory) {
         $total = 0;
-
         foreach ($inventory as $row) {
             $total += (int)($row['quantity'] ?? 0);
         }
-
         return $total;
     }
 
@@ -747,10 +651,7 @@ class InventoryChatbot {
         $message = trim($message);
 
         if ($message === '') {
-            return [
-                'status' => false,
-                'reply' => 'Please enter a message.'
-            ];
+            return ['status' => false,'reply' => 'Please enter a message.'];
         }
 
         $context = $this->getInventoryContext();
@@ -761,11 +662,7 @@ class InventoryChatbot {
         $ollama = $this->analyzeInventoryRequest($message, $context, $history);
 
         if (!$ollama['success']) {
-            return [
-                'status' => false,
-                'reply' => 'Unable to connect to the chatbot.',
-                'error' => $ollama['error']
-            ];
+            return ['status' => false,'reply' => 'Unable to connect to the chatbot.','error' => $ollama['error']];
         }
 
         $ai = $this->parseOllamaResponse($ollama['content']);
@@ -780,7 +677,6 @@ class InventoryChatbot {
             $itemSpecification = trim((string)($ai['item_specification'] ?? ''));
             $reportName = strtolower(trim((string)($ai['report_name'] ?? '')));
 
-            // Prefer an explicit report name in the user's message over the model's guess.
             $requestText = strtolower($message);
             if (strpos($requestText, 'audit trail') !== false || strpos($requestText, 'audit history') !== false) {
                 $reportName = 'audit_trail';
@@ -801,7 +697,6 @@ class InventoryChatbot {
                 return $this->finishChatResponse('Please specify a valid report date range, such as January 1 to March 31, 2026.', $context);
             }
 
-            
             if (strtolower($campus) === 'all') {
                 $campus = '';
             }
@@ -809,7 +704,7 @@ class InventoryChatbot {
             $campusDescription = $campus;
 
             if ($campus !== '') {
-                $campuses = $this->extras->getCampusID();
+                $campuses = $this->getCampusID();
                 $matchedCampus = null;
 
                 foreach ($campuses as $campusRow) {
@@ -823,7 +718,7 @@ class InventoryChatbot {
                 }
 
                 if (!$matchedCampus && !ctype_digit($campus)) {
-                    $matches = $this->extras->getCampusID($campus);
+                    $matches = $this->getCampusID($campus);
 
                     if (count($matches) === 1) {
                         $matchedCampus = $matches[0];
@@ -841,7 +736,7 @@ class InventoryChatbot {
             $courseDescription = $course;
 
             if ($reportName === 'overall' && $course !== '') {
-                $courses = $this->extras->getCourseID();
+                $courses = $this->getCourseID();
                 $matchedCourse = null;
 
                 foreach ($courses as $courseRow) {
@@ -855,7 +750,7 @@ class InventoryChatbot {
                 }
 
                 if (!$matchedCourse && !ctype_digit($course)) {
-                    $matches = $this->extras->getCourseID($course);
+                    $matches = $this->getCourseID($course);
 
                     if (count($matches) === 1) {
                         $matchedCourse = $matches[0];
@@ -883,7 +778,7 @@ class InventoryChatbot {
                 $params['item_specification'] = $itemSpecification;
             }
 
-            $pdfUrl = INVENTORY_URL . '/admin/reports/xPDFLoader.php?' . http_build_query($params);
+            $pdfUrl = $this->INVENTORY_URL . '/admin/reports/xPDFLoader.php?' . http_build_query($params);
             $reportLabels = ['inventory' => 'inventory', 'audit_trail' => 'audit trail', 'overall' => 'overall', 'sales' => 'sales'];
             $reply = 'Your ' . $reportLabels[$reportName] . ' PDF report is ready to open. Date range: ' . $from . ' to ' . $to;
             $reply .= ($campus !== '' ? '. Campus: ' . $campusDescription : '. All campuses');
@@ -932,7 +827,7 @@ class InventoryChatbot {
 
             $this->saveInventoryContext($filters);
 
-            $inventory = $this->inventory->getInventory();
+            $inventory = $this->getInventory();
             $filteredInventory = $this->filterInventory($inventory, $filters);
 
             if ($filters['response_type'] === 'list') {
@@ -960,28 +855,22 @@ class InventoryChatbot {
     }
 }
 
-$chatbot = new InventoryChatbot();
+$Chatbot = new ChatbotController();
 
 if (isset($_GET['action']) && $_GET['action'] === 'get_history') {
-    echo json_encode([
-        'status' => true,
-        'history' => $chatbot->getConversationHistory()
-    ]);
+    echo json_encode(['status' => true,'history' => $Chatbot->getConversationHistory()]);
     exit;
 }
 
 if (isset($_GET['action']) && $_GET['action'] === 'new_chat') {
-    echo json_encode($chatbot->newChat());
+    echo json_encode($Chatbot->newChat());
     exit;
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $message = $_POST['message'] ?? '';
-    echo json_encode($chatbot->processChat($message));
+    echo json_encode($Chatbot->processChat($message));
     exit;
 }
 
-echo json_encode([
-    'status' => false,
-    'reply' => 'Invalid request.'
-]);
+echo json_encode(['status' => false,'reply' => 'Invalid request.']);
