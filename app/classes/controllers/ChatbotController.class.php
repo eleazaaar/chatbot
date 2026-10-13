@@ -1,5 +1,4 @@
 <?php
-
 header('Content-Type: application/json; charset=utf-8');
 
 if (!function_exists('fileExists')) {
@@ -848,29 +847,30 @@ class ChatbotController extends ChatbotModel {
         $_SESSION['conversation'] = [];
         $_SESSION['inventory_context'] = $this->getDefaultInventoryContext();
 
-        return [
-            'status' => true,
-            'reply' => 'New chat started.'
-        ];
+        return ['status' => true,'reply' => 'New chat started.'];
     }
 }
 
-$Chatbot = new ChatbotController();
+if (isset($_GET['action'])) {
+    $action = $_GET['action'];
+    $Chatbot = new ChatbotController();
+    
+    if ($action == 'get_history') {
+        echo json_encode(['status' => true,'history' => $Chatbot->getConversationHistory()]);
+        exit;
+    }
 
-if (isset($_GET['action']) && $_GET['action'] === 'get_history') {
-    echo json_encode(['status' => true,'history' => $Chatbot->getConversationHistory()]);
+    if ($action === 'new_chat') {
+        echo json_encode($Chatbot->newChat());
+        exit;
+    }
+
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        $message = $_POST['message'] ?? '';
+        echo json_encode($Chatbot->processChat($message));
+        exit;
+    }
+
+    echo json_encode(['status' => false,'reply' => 'Invalid request.']);
     exit;
 }
-
-if (isset($_GET['action']) && $_GET['action'] === 'new_chat') {
-    echo json_encode($Chatbot->newChat());
-    exit;
-}
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $message = $_POST['message'] ?? '';
-    echo json_encode($Chatbot->processChat($message));
-    exit;
-}
-
-echo json_encode(['status' => false,'reply' => 'Invalid request.']);
